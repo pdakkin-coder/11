@@ -1,3 +1,9 @@
+/**
+ * CitaDex logo — a refined monogram mark combining the letters C and D
+ * within a rounded square. The C arc represents "Citation" and the vertical
+ * bar of the D represents "Dex" / index. Works at any size, uses currentColor
+ * so it adapts to both light and dark themes automatically.
+ */
 export function CodexLogo({ size = 26 }: { size?: number }) {
   return (
     <svg
@@ -9,24 +15,63 @@ export function CodexLogo({ size = 26 }: { size?: number }) {
       aria-label="CitaDex"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {/* Soft monogram: a stylised quotation mark sitting inside a rounded square */}
+      {/* Rounded-square background tile */}
       <rect
-        x="2.5"
-        y="2.5"
-        width="27"
-        height="27"
-        rx="7"
+        x="1"
+        y="1"
+        width="30"
+        height="30"
+        rx="8"
+        fill="currentColor"
+        fillOpacity="0.10"
         stroke="currentColor"
-        strokeOpacity="0.35"
-        strokeWidth="1.4"
+        strokeOpacity="0.25"
+        strokeWidth="1.2"
       />
+
+      {/* C arc — open circle on the left, representing “Citation” */}
       <path
-        d="M11.5 11.5c-2.4 0.6-4.2 2.6-4.2 5.4 0 2.4 1.6 4.1 3.8 4.1 1.7 0 3-1.2 3-2.9 0-1.6-1.2-2.7-2.7-2.7-0.3 0-0.6 0.04-0.9 0.13 0.2-1.5 1.4-2.7 2.9-3.1l-1.9-1z"
-        fill="currentColor"
+        d="M18.5 9.5 C14.5 9.5 11 12.4 11 16 C11 19.6 14.5 22.5 18.5 22.5"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeOpacity="0.90"
       />
-      <path
-        d="M21 11.5c-2.4 0.6-4.2 2.6-4.2 5.4 0 2.4 1.6 4.1 3.8 4.1 1.7 0 3-1.2 3-2.9 0-1.6-1.2-2.7-2.7-2.7-0.3 0-0.6 0.04-0.9 0.13 0.2-1.5 1.4-2.7 2.9-3.1l-1.9-1z"
-        fill="currentColor"
+
+      {/* D vertical bar — right side, representing “Dex” / index */}
+      <line
+        x1="21"
+        y1="9.5"
+        x2="21"
+        y2="22.5"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeOpacity="0.90"
+      />
+
+      {/* D upper serif connector */}
+      <line
+        x1="18.5"
+        y1="9.5"
+        x2="21"
+        y2="9.5"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeOpacity="0.90"
+      />
+
+      {/* D lower serif connector */}
+      <line
+        x1="18.5"
+        y1="22.5"
+        x2="21"
+        y2="22.5"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeOpacity="0.90"
       />
     </svg>
   );
