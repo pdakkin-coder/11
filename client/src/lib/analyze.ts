@@ -231,7 +231,6 @@ export function findCitations(text: string): FoundItem[] {
     /\([A-ZА-ЯЁ][a-zа-яё]+(?:\s+et al\.?)?\s+(?:19|20)\d{2}(?:,\s*p\.\s*\d+)?\)/gu;
   for (const m of text.matchAll(harvardInline)) {
     const s = m.index!;
-    // Skip if already captured as APA
     if (found.some((f) => f.start <= s && s < f.end)) continue;
     found.push({
       id: nextId("harvard"),
@@ -282,7 +281,6 @@ export function findCitations(text: string): FoundItem[] {
   for (const m of text.matchAll(vancouverInline)) {
     const s = m.index!;
     if (found.some((f) => f.start <= s && s < f.end)) continue;
-    // Exclude if looks like year (4 digits)
     if (/^\((?:19|20)\d{2}\)$/.test(m[0])) continue;
     found.push({
       id: nextId("van"),
@@ -297,7 +295,6 @@ export function findCitations(text: string): FoundItem[] {
   }
 
   // ── 6. Chicago superscript footnote refs: .[1] or just superscript-like
-  //    We look for patterns like «text».[1] or text.[2]
   const chicagoRef = /\.\[\d+\]/gu;
   for (const m of text.matchAll(chicagoRef)) {
     const s = m.index!;
@@ -392,7 +389,6 @@ export function findCitations(text: string): FoundItem[] {
   for (let li = 0; li < lines.length; li++) {
     const raw = lines[li];
     const trimmed = raw.trimStart();
-    // Match lines that look like footnote entries: "1. Text" or "¹ Text"
     if (
       /^\d+[.)\s]\s+\S/.test(trimmed) &&
       trimmed.length > 20 &&
@@ -582,20 +578,11 @@ export function convertCitations(
 
   switch (target) {
     case "APA": {
-      // Numeric [1] → (Source 1, 2020) placeholder
-      out = out.replace(/\[(\d+)\]/g, (_m, n) => {
-        converted++;
-        return `(Source ${n}, 2020)`;
-      });
-      // Chicago footnote ref .[1] → (Source 1, 2020)
-      out = out.replace(/\.\[(\d+)\]/g, (_m, n) => {
-        converted++;
-        return ` (Source ${n}, 2020).`;
-      });
+      out = out.replace(/\[(\d+)\]/g, (_m, n) => { converted++; return `(Source ${n}, 2020)`; });
+      out = out.replace(/\.\[(\d+)\]/g, (_m, n) => { converted++; return ` (Source ${n}, 2020).`; });
       break;
     }
     case "Chicago": {
-      // APA (Author, Year) → Footnote style Author, Year.
       out = out.replace(
         /\(([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*)?,?\s*((?:19|20)\d{2}[a-z]?)\)/gu,
         (_m, author, year) => { converted++; return `${author || "Author"}, ${year}.`; },
@@ -603,7 +590,6 @@ export function convertCitations(
       break;
     }
     case "MLA": {
-      // APA (Author, Year) → (Author page)
       out = out.replace(
         /\(([A-ZА-ЯЁ][a-zа-яё]+)(?:,\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
         (_m, author) => { converted++; return `(${author} 00)`; },
@@ -611,7 +597,6 @@ export function convertCitations(
       break;
     }
     case "IEEE": {
-      // APA → numeric placeholder [n]
       let n = 1;
       out = out.replace(
         /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
@@ -620,7 +605,6 @@ export function convertCitations(
       break;
     }
     case "Vancouver": {
-      // APA → (n)
       let n = 1;
       out = out.replace(
         /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
@@ -629,7 +613,6 @@ export function convertCitations(
       break;
     }
     case "Harvard": {
-      // APA (Author, Year) → (Author Year)
       out = out.replace(
         /\(([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*)?,?\s*((?:19|20)\d{2}[a-z]?)(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
         (_m, author, year) => { converted++; return `(${author || "Author"} ${year})`; },
@@ -637,7 +620,6 @@ export function convertCitations(
       break;
     }
     case "GOST": {
-      // APA → [n]
       let n = 1;
       out = out.replace(
         /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
@@ -700,20 +682,56 @@ const HEADING_KEYWORDS = new Set([
 /**
  * Returns heading level (1 or 2) if the line looks like a section heading,
  * or null if it is body text / bib entry / footnote.
+ *
+ * Guards against false positives:
+ *  - Numbered footnote lines: "1. Иванов И.И. ..." → null
+ *  - Numbered bibliography lines: "1. Author (2020). Title..." → null
+ *  - Lines containing a year → null (bib entries, footnotes)
+ *  - Lines ending with sentence-final punctuation → null
+ *  - Lines containing a URL → null
+ *  - Lines starting with a quote mark → null
+ *  - Long lines with many commas (bib/footnote content) → null
  */
 function classifyHeading(line: string): number | null {
   if (!line || line.length > 120 || line.length < 3) return null;
+
+  // Markdown headings: ## Heading
   if (/^(#{1,6})\s+/.test(line)) return line.match(/^(#{1,6})/)?.[1].length ?? 1;
-  if (/^\d+\.\d+(?:\.\d+)*\.?\s+[A-ZА-ЯЁ]/u.test(line)) return 2;
+
+  // Numbered section headings: "1.2 Title" or "3. Title" (no author pattern)
+  if (/^\d+\.(\d+\.)*\s+[A-ZА-ЯЁ]/u.test(line)) {
+    // Exclude numbered footnote/bib lines: digit+dot followed by author surname (Capitalised word, comma)
+    if (/^\d+\.\s+[A-ZА-ЯЁ][a-zа-яё]+(,|\s+[A-ZА-ЯЁ]\.)/.test(line)) return null;
+    return 2;
+  }
+
+  // ALL-CAPS heading
   if (/^[A-ZА-ЯЁ][A-ZА-ЯЁ\s-]{4,}$/u.test(line)) return 1;
+
+  // Sentence-ending punctuation → body text
   if (/[.!?,;]$/.test(line)) return null;
+
+  // Contains a year → likely bib entry or footnote
   if (/\b(19|20)\d{2}\b/.test(line)) return null;
+
+  // Contains URL → not a heading
   if (line.includes("http")) return null;
+
+  // Starts with quote mark → not a heading
   if (/^[«""]/.test(line)) return null;
+
+  // Many commas + long line → bib/footnote content
   if (line.split(",").length >= 3 && line.length > 60) return null;
+
+  // Must start with a letter
   if (!/^[A-ZА-ЯЁa-zа-яё]/u.test(line)) return null;
+
+  // Explicit known heading keywords (Title Case or lowercase match)
   if (HEADING_KEYWORDS.has(line.toLowerCase())) return 1;
+
+  // Short enough to be a heading title
   if (line.length <= 70) return 2;
+
   return null;
 }
 
@@ -753,14 +771,6 @@ function buildStructure(text: string) {
     footnoteCount: lines.filter((l) => /^\s*\d+[.)]/.test(l)).length,
     bibCount: lines.filter((l) => isBibEntryLine(l.trim())).length,
   };
-}
-
-function findSectionStart(text: string, names: string[]): number {
-  const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    if (names.some((n) => n.toLowerCase() === lines[i].trim().toLowerCase())) return i + 1;
-  }
-  return -1;
 }
 
 // ---------------------------------------------------------------------------
