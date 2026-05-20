@@ -826,6 +826,9 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
         {result.converted === 0 && target === detected.style && (
           <div className="text-[11px] text-muted-foreground">ℹ Документ уже в формате {target} — конвертация не требуется.</div>
         )}
+        {result.converted === 0 && target !== detected.style && (
+          <div className="text-[11px] text-muted-foreground">ℹ Конвертер не нашёл цитат, подходящих под заданный шаблон. Попробуйте другой стиль или документ.</div>
+        )}
         {result.warnings.length > 0 && result.converted > 0 && (
           <div className="text-[11px] text-warning space-y-0.5">
             {result.warnings.slice(0, 3).map((w, i) => <div key={i}>⚠ {w}</div>)}
