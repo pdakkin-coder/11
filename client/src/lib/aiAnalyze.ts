@@ -3,7 +3,9 @@
  *
  * Sends document text to the AI endpoint and returns enriched citation data.
  * If the endpoint is unavailable (501/502) the caller should fall back to
- * the heuristic-only path.
+ * the heuristic-only path. For convenience, this hook also returns
+ * an AiAnalyzeResponse with an `error` field when the server responds
+ * with a non-2xx status so that UI code can show a proper message.
  */
 
 import { useState, useCallback, useRef } from "react";
@@ -56,19 +58,42 @@ export function useAiAnalyze() {
         body: JSON.stringify(req),
         signal: ctrl.signal,
       });
+
+      const isJson = (res.headers.get("content-type") || "").includes("application/json");
+      const payload = isJson ? await res.json() : await res.text();
+
       if (!res.ok) {
-        let errMsg = `HTTP ${res.status}`;
-        try { const errJson = await res.json(); errMsg = errJson?.error ?? errMsg; } catch { errMsg = await res.text() || errMsg; }
-        throw new Error(errMsg);
+        const msg = typeof payload === "string" ? payload || `HTTP ${res.status}` : (payload?.error as string) || `HTTP ${res.status}`;
+        const errorResponse: AiAnalyzeResponse = {
+          items: [],
+          bibEntries: [],
+          detectedStyle: "Unknown",
+          confidence: 0,
+          language: req.language ?? "mixed",
+          summary: "",
+          error: msg,
+        };
+        setState({ data: errorResponse, loading: false, error: msg });
+        return errorResponse;
       }
-      const data: AiAnalyzeResponse = await res.json();
+
+      const data = payload as AiAnalyzeResponse;
       setState({ data, loading: false, error: null });
       return data;
     } catch (err) {
       if ((err as Error).name === "AbortError") return null;
       const msg = err instanceof Error ? err.message : String(err);
-      setState({ data: null, loading: false, error: msg });
-      return null;
+      const errorResponse: AiAnalyzeResponse = {
+        items: [],
+        bibEntries: [],
+        detectedStyle: "Unknown",
+        confidence: 0,
+        language: req.language ?? "mixed",
+        summary: "",
+        error: msg,
+      };
+      setState({ data: errorResponse, loading: false, error: msg });
+      return errorResponse;
     }
   }, []);
 
