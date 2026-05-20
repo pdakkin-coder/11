@@ -682,6 +682,41 @@ export function analyzeStructure(text: string): ReturnType<typeof buildStructure
   return buildStructure(text);
 }
 
+const HEADING_KEYWORDS = new Set([
+  "введение", "заключение", "выводы", "обсуждение",
+  "методология", "метод", "методы", "методика",
+  "результаты", "результаты и обсуждение",
+  "теоретические основы", "обзор литературы",
+  "список литературы", "список цитированной литературы",
+  "библиография", "литература", "использованная литература",
+  "источники и литература", "список источников",
+  "примечания", "сноски", "комментарии",
+  "references", "bibliography", "works cited", "works consulted",
+  "notes", "footnotes", "endnotes", "introduction", "conclusion",
+  "methods", "methodology", "results", "discussion",
+  "abstract", "аннотация", "резюме",
+]);
+
+/**
+ * Returns heading level (1 or 2) if the line looks like a section heading,
+ * or null if it is body text / bib entry / footnote.
+ */
+function classifyHeading(line: string): number | null {
+  if (!line || line.length > 120 || line.length < 3) return null;
+  if (/^(#{1,6})\s+/.test(line)) return line.match(/^(#{1,6})/)?.[1].length ?? 1;
+  if (/^\d+\.\d+(?:\.\d+)*\.?\s+[A-ZА-ЯЁ]/u.test(line)) return 2;
+  if (/^[A-ZА-ЯЁ][A-ZА-ЯЁ\s-]{4,}$/u.test(line)) return 1;
+  if (/[.!?,;]$/.test(line)) return null;
+  if (/\b(19|20)\d{2}\b/.test(line)) return null;
+  if (line.includes("http")) return null;
+  if (/^[«""]/.test(line)) return null;
+  if (line.split(",").length >= 3 && line.length > 60) return null;
+  if (!/^[A-ZА-ЯЁa-zа-яё]/u.test(line)) return null;
+  if (HEADING_KEYWORDS.has(line.toLowerCase())) return 1;
+  if (line.length <= 70) return 2;
+  return null;
+}
+
 function buildStructure(text: string) {
   const lines = text.split("\n");
   const headings: { line: number; level: number; text: string; title?: string }[] = [];
@@ -696,15 +731,9 @@ function buildStructure(text: string) {
     if (!line) continue;
     paragraphs++;
 
-    if (/^(#{1,6})\s+/.test(line)) {
-      const level = line.match(/^(#{1,6})/)?.[1].length ?? 1;
-      headings.push({ line: i + 1, level, text: line.replace(/^#{1,6}\s+/, "") });
-    } else if (
-      // Require at least a two-part number (1.2 ...) to avoid matching footnote entries (1. Author...)
-      /^\d+\.\d+(?:\.\d+)*\.?\s+[A-ZА-ЯЁ]/u.test(line) ||
-      /^[A-ZА-ЯЁ][A-ZА-ЯЁ\s-]{4,}$/u.test(line)
-    ) {
-      headings.push({ line: i + 1, level: 2, text: line });
+    const headingLevel = classifyHeading(line);
+    if (headingLevel !== null) {
+      headings.push({ line: i + 1, level: headingLevel, text: line.replace(/^#{1,6}\s+/, "") });
     }
 
     if (BIBLIOGRAPHY_HEADERS.some((h) => h.toLowerCase() === line.toLowerCase())) currentBibStart = i + 1;
