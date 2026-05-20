@@ -56,7 +56,11 @@ export function useAiAnalyze() {
         body: JSON.stringify(req),
         signal: ctrl.signal,
       });
-      if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+      if (!res.ok) {
+        let errMsg = `HTTP ${res.status}`;
+        try { const errJson = await res.json(); errMsg = errJson?.error ?? errMsg; } catch { errMsg = await res.text() || errMsg; }
+        throw new Error(errMsg);
+      }
       const data: AiAnalyzeResponse = await res.json();
       setState({ data, loading: false, error: null });
       return data;

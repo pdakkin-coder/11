@@ -844,7 +844,10 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
           <span className="text-[12px] font-medium">Статус конвертации</span>
           <Badge variant="outline" className="text-[10px]">{result.converted} изменений</Badge>
         </div>
-        {result.warnings.length > 0 && (
+        {result.converted === 0 && target === detected.style && (
+          <div className="text-[11px] text-muted-foreground">ℹ Документ уже в формате {target} — конвертация не требуется.</div>
+        )}
+        {result.warnings.length > 0 && result.converted > 0 && (
           <div className="text-[11px] text-warning space-y-0.5">
             {result.warnings.slice(0, 3).map((w, i) => <div key={i}>⚠ {w}</div>)}
           </div>
@@ -898,7 +901,7 @@ function StructurePanel({ structure, onJump }: { structure: ReturnType<typeof an
             <button key={i} onClick={() => onJump(s.line)}
               className="w-full text-left text-[12.5px] px-2 py-1.5 rounded hover:bg-accent/50 flex items-center gap-2">
               <span className="text-muted-foreground font-mono text-[10px] w-6 shrink-0">{s.line}</span>
-              <span className="truncate">{s.title}</span>
+              <span className="truncate">{s.text}</span>
             </button>
           ))}
         </div>

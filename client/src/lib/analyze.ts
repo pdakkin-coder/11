@@ -1,7 +1,55 @@
 // Analysis library for CitaDex
-// All logic is heuristic; AI-assisted path available via /api/ai-analyze.
+// All logic is heuristic; AI-assisted path available via /api/ai-analyze
 
-export type CitationStyle = "APA" | "Chicago" | "MLA" | "IEEE" | "Vancouver" | "Harvard" | "GOST" | "Custom" | "Unknown";
+/**
+ * Citation style labels used throughout the app.
+ * Keep in sync with CitationStyle type below.
+ */
+export type CitationStyle =
+  | "APA"
+  | "Chicago"
+  | "MLA"
+  | "IEEE"
+  | "Vancouver"
+  | "Harvard"
+  | "GOST"
+  | "Custom"
+  | "Unknown";
+
+export interface FoundItem {
+  id: string;
+  type:
+    | "inline-apa"
+    | "inline-numeric"
+    | "footnote"
+    | "bibliography"
+    | "ibid"
+    | "quote";
+  text: string;
+  start: number;
+  end: number;
+  line: number;
+  confidence?: number;
+  note?: string;
+}
+
+export interface EditorIssue {
+  id: string;
+  type:
+    | "длинное-предложение"
+    | "пассив"
+    | "разговорный-маркер"
+    | "слабая-формулировка"
+    | "повтор"
+    | "неопределённый-указатель"
+    | "пунктуация"
+    | "канцелярит";
+  text: string;
+  start: number;
+  end: number;
+  line: number;
+  suggestion?: string;
+}
 
 export interface CustomCitationRules {
   name: string;
@@ -10,662 +58,625 @@ export interface CustomCitationRules {
   bibliographyTemplate: string;
   footnoteTemplate: string;
   separator: string;
-  sourceTypes?: SourceTypeTemplate[];
 }
-
-export type SourceTypeId =
-  | "book" | "book-chapter" | "journal-article" | "anthology-article"
-  | "newspaper" | "magazine" | "web" | "blog" | "thesis" | "dissertation"
-  | "archive" | "manuscript" | "law" | "legal-case" | "report"
-  | "government-doc" | "conference" | "conference-paper" | "encyclopedia"
-  | "dictionary" | "map" | "film" | "tv" | "interview" | "letter"
-  | "dataset" | "software";
 
 export interface SourceTypeTemplate {
-  id: SourceTypeId;
+  id: string;
   label: string;
   fields: string[];
-  fullNote: string;
-  shortNote: string;
-  bibliography: string;
-  inText: string;
+  apaTemplate: string;
 }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const BIBLIOGRAPHY_HEADERS = [
+  "Список литературы",
+  "Список цитированной литературы",
+  "Библиография",
+  "Литература",
+  "Использованная литература",
+  "Источники и литература",
+  "Список источников",
+  "Список использованных источников",
+  "References",
+  "Bibliography",
+  "Works Cited",
+  "Works consulted",
+  "List of References",
+  "Sources",
+];
+
+const FOOTNOTE_HEADERS = [
+  "Сноски",
+  "Примечания",
+  "Комментарии",
+  "Notes",
+  "Footnotes",
+  "Endnotes",
+  "Note",
+];
+
+// ---------------------------------------------------------------------------
+// Source type templates (for SourceTypeBuilder UI)
+// ---------------------------------------------------------------------------
 
 export const DEFAULT_SOURCE_TYPES: SourceTypeTemplate[] = [
   {
-    id: "book",
-    label: "Книга (монография)",
-    fields: ["author","title","edition","translator","editor","place","publisher","year","total_pages","series","isbn","doi","url"],
-    fullNote: "{author}. {title}{edition, ed.}. {place}: {publisher}, {year}. {total_pages} с.",
-    shortNote: "{author}, {title}, {pages}.",
-    bibliography: "{author}. {title}{edition, ed.}. {place}: {publisher}, {year}.",
-    inText: "({author}, {year})",
-  },
-  {
-    id: "book-chapter",
-    label: "Глава / статья в книге",
-    fields: ["author","title","editor","container_title","edition","place","publisher","year","pages","doi","url"],
-    fullNote: "{author}. {title} // {container_title} / под ред. {editor}. {place}: {publisher}, {year}. С. {pages}.",
-    shortNote: "{author}, \u00ab{title}\u00bb, {pages}.",
-    bibliography: "{author}. {title} // {container_title} / под ред. {editor}. {place}: {publisher}, {year}. \u2014 С. {pages}.",
-    inText: "({author}, {year}, с. {pages})",
-  },
-  {
-    id: "journal-article",
+    id: "journal",
     label: "Статья в журнале",
-    fields: ["author","title","container_title","year","volume","issue","pages","doi","url","access_date"],
-    fullNote: "{author}. {title} // {container_title}. {year}. Т.\u202f{volume}, №\u202f{issue}. С.\u202f{pages}.",
-    shortNote: "{author}, \u00ab{title}\u00bb, {pages}.",
-    bibliography: "{author}. {title} // {container_title}. \u2014 {year}. \u2014 Т.\u202f{volume}, №\u202f{issue}. \u2014 С.\u202f{pages}. \u2014 DOI:\u202f{doi}.",
-    inText: "({author}, {year})",
+    fields: ["author", "year", "title", "journal", "volume", "issue", "pages", "doi"],
+    apaTemplate:
+      "{author} ({year}). {title}. {journal}, {volume}({issue}), {pages}. https://doi.org/{doi}",
   },
   {
-    id: "newspaper",
-    label: "Статья в газете",
-    fields: ["author","title","container_title","date","pages","url","access_date"],
-    fullNote: "{author}. {title} // {container_title}. {date}. С.\u202f{pages}.",
-    shortNote: "{author}, \u00ab{title}\u00bb.",
-    bibliography: "{author}. {title} // {container_title}. \u2014 {date}. \u2014 С.\u202f{pages}.",
-    inText: "({author}, {date})",
+    id: "book",
+    label: "Книга",
+    fields: ["author", "year", "title", "publisher", "place"],
+    apaTemplate: "{author} ({year}). {title}. {publisher}.",
   },
   {
-    id: "magazine",
-    label: "Статья в журнале (нон-фикшн)",
-    fields: ["author","title","container_title","date","pages","url","access_date"],
-    fullNote: "{author}. {title} // {container_title}. {date}. С.\u202f{pages}.",
-    shortNote: "{author}, \u00ab{title}\u00bb.",
-    bibliography: "{author}. {title} // {container_title}. \u2014 {date}. \u2014 С.\u202f{pages}.",
-    inText: "({author}, {date})",
-  },
-  {
-    id: "anthology-article",
-    label: "Статья в сборнике",
-    fields: ["author","title","container_title","editor","place","publisher","year","pages","doi"],
-    fullNote: "{author}. {title} // {container_title} / сост. {editor}. {place}: {publisher}, {year}. С.\u202f{pages}.",
-    shortNote: "{author}, \u00ab{title}\u00bb, {pages}.",
-    bibliography: "{author}. {title} // {container_title} / сост. {editor}. {place}: {publisher}, {year}. \u2014 С.\u202f{pages}.",
-    inText: "({author}, {year})",
+    id: "chapter",
+    label: "Глава в сборнике",
+    fields: ["author", "year", "title", "editor", "bookTitle", "pages", "publisher"],
+    apaTemplate:
+      "{author} ({year}). {title}. In {editor} (Ed.), {bookTitle} (pp. {pages}). {publisher}.",
   },
   {
     id: "web",
-    label: "Веб-страница / сайт",
-    fields: ["author","title","container_title","date","url","access_date"],
-    fullNote: "{author}. {title} [Электронный ресурс] // {container_title}. {date}. URL: {url} (дата обращения: {access_date}).",
-    shortNote: "{author}, \u00ab{title}\u00bb.",
-    bibliography: "{author}. {title} [Электронный ресурс]. \u2014 URL: {url} (дата обращения: {access_date}).",
-    inText: "({author}, {date})",
-  },
-  {
-    id: "blog",
-    label: "Блог / онлайн-публикация",
-    fields: ["author","title","container_title","date","url","access_date"],
-    fullNote: "{author}. {title} [Blog] // {container_title}. {date}. URL: {url} (дата обращения: {access_date}).",
-    shortNote: "{author}, \u00ab{title}\u00bb.",
-    bibliography: "{author}. {title} [Blog]. \u2014 URL: {url} (дата обращения: {access_date}).",
-    inText: "({author}, {date})",
+    label: "Веб-источник",
+    fields: ["author", "year", "title", "url", "accessed"],
+    apaTemplate: "{author} ({year}). {title}. Retrieved {accessed}, from {url}",
   },
   {
     id: "thesis",
-    label: "Кандидатская диссертация",
-    fields: ["author","title","degree","specialty_code","institution","place","year","total_pages","url"],
-    fullNote: "{author}. {title}: дис. … канд. {degree} наук. {institution}. {place}, {year}. {total_pages} с.",
-    shortNote: "{author}, {title}, {pages}.",
-    bibliography: "{author}. {title}: дис. … канд. {degree} наук. \u2014 {place}: {institution}, {year}. \u2014 {total_pages} с.",
-    inText: "({author}, {year})",
-  },
-  {
-    id: "dissertation",
-    label: "Докторская диссертация",
-    fields: ["author","title","degree","specialty_code","institution","place","year","total_pages","url"],
-    fullNote: "{author}. {title}: дис. … д-ра {degree} наук. {institution}. {place}, {year}. {total_pages} с.",
-    shortNote: "{author}, {title}, {pages}.",
-    bibliography: "{author}. {title}: дис. … д-ра {degree} наук. \u2014 {place}: {institution}, {year}. \u2014 {total_pages} с.",
-    inText: "({author}, {year})",
-  },
-  {
-    id: "archive",
-    label: "Архивный документ",
-    fields: ["archive","archive_abbr","fond","fond_title","opis","delo","list","list_to","title","date"],
-    fullNote: "{archive}. Ф.\u202f{fond}. Оп.\u202f{opis}. Д.\u202f{delo}. Л.\u202f{list}{list_to, \u2013list_to}. ({title}, {date}.)",
-    shortNote: "{archive_abbr}. Ф.\u202f{fond}. Д.\u202f{delo}. Л.\u202f{list}.",
-    bibliography: "{archive}. Ф.\u202f{fond} ({fond_title}). Оп.\u202f{opis}. Д.\u202f{delo}.",
-    inText: "({archive_abbr}, Ф.\u202f{fond}/Д.\u202f{delo}, Л.\u202f{list})",
-  },
-  {
-    id: "manuscript",
-    label: "Рукопись / неопубликованный документ",
-    fields: ["author","title","type","place","year","pages","archive","fond"],
-    fullNote: "{author}. {title}: {type}. {place}, {year}. {pages} с. (Рукопись.)",
-    shortNote: "{author}, {title} ({type}), {pages}.",
-    bibliography: "{author}. {title}: {type}. \u2014 {place}, {year}. \u2014 {pages} с. (Рукопись.)",
-    inText: "({author}, {year})",
-  },
-  {
-    id: "law",
-    label: "Федеральный закон / нормативный акт",
-    fields: ["title","act_type","act_number","act_date","container_title","year","issue","article","url","access_date"],
-    fullNote: "{title}: {act_type} от {act_date} №\u202f{act_number} // {container_title}. {year}. №\u202f{issue}. Ст.\u202f{article}.",
-    shortNote: "{title}.",
-    bibliography: "{title}: {act_type} от {act_date} №\u202f{act_number} // {container_title}. \u2014 {year}. \u2014 №\u202f{issue}. \u2014 Ст.\u202f{article}.",
-    inText: "({title}, {act_date})",
-  },
-  {
-    id: "legal-case",
-    label: "Судебное решение",
-    fields: ["court","case_number","date","parties","url","access_date"],
-    fullNote: "{court}. Решение №\u202f{case_number} от {date} по делу «{parties}».",
-    shortNote: "{court}, №\u202f{case_number}.",
-    bibliography: "{court}. Решение №\u202f{case_number} от {date} по делу «{parties}».",
-    inText: "({court}, {case_number}, {date})",
+    label: "Диссертация",
+    fields: ["author", "year", "title", "type", "institution"],
+    apaTemplate: "{author} ({year}). {title} [{type}]. {institution}.",
   },
   {
     id: "report",
-    label: "Технический / аналитический отчёт",
-    fields: ["author","title","report_number","organization","place","year","total_pages","doi","url"],
-    fullNote: "{author}. {title}: отчёт №\u202f{report_number} / {organization}. {place}, {year}. {total_pages} с.",
-    shortNote: "{author}, \u00ab{title}\u00bb.",
-    bibliography: "{author}. {title}: отчёт №\u202f{report_number} / {organization}. \u2014 {place}, {year}. \u2014 {total_pages} с.",
-    inText: "({author}, {year})",
-  },
-  {
-    id: "government-doc",
-    label: "Правительственный документ / стратегия",
-    fields: ["organization","title","act_type","act_number","act_date","place","publisher","year","url","access_date"],
-    fullNote: "{organization}. {title}: {act_type} от {act_date} №\u202f{act_number}. {place}: {publisher}, {year}.",
-    shortNote: "{organization}, \u00ab{title}\u00bb.",
-    bibliography: "{organization}. {title}: {act_type} от {act_date} №\u202f{act_number}. \u2014 {place}: {publisher}, {year}.",
-    inText: "({organization}, {year})",
-  },
-  {
-    id: "conference",
-    label: "Материалы конференции (сборник)",
-    fields: ["editor","title","conference_name","conference_date","place","publisher","year","total_pages","doi","url"],
-    fullNote: "{title}: мат. конф. \u00ab{conference_name}\u00bb ({conference_date}). {place}: {publisher}, {year}.",
-    shortNote: "{title}: мат. конф. {conference_date}.",
-    bibliography: "{title}: мат. конф. \u00ab{conference_name}\u00bb ({conference_date}). \u2014 {place}: {publisher}, {year}.",
-    inText: "({editor}, {year})",
-  },
-  {
-    id: "conference-paper",
-    label: "Доклад на конференции",
-    fields: ["author","title","container_title","conference_name","conference_date","place","publisher","year","pages","doi"],
-    fullNote: "{author}. {title} // {container_title}: мат. конф. \u00ab{conference_name}\u00bb. {place}: {publisher}, {year}. С.\u202f{pages}.",
-    shortNote: "{author}, \u00ab{title}\u00bb, {pages}.",
-    bibliography: "{author}. {title} // {container_title}: мат. конф. \u00ab{conference_name}\u00bb. \u2014 {place}: {publisher}, {year}. \u2014 С.\u202f{pages}.",
-    inText: "({author}, {year})",
-  },
-  {
-    id: "encyclopedia",
-    label: "Статья в энциклопедии / справочнике",
-    fields: ["author","title","container_title","editor","edition","volume","place","publisher","year","pages"],
-    fullNote: "{author}. {title} // {container_title} / под ред. {editor}. {edition}-е изд. Т.\u202f{volume}. {place}: {publisher}, {year}. С.\u202f{pages}.",
-    shortNote: "{author}, \u00ab{title}\u00bb, {pages}.",
-    bibliography: "{author}. {title} // {container_title}. \u2014 {place}: {publisher}, {year}. \u2014 Т.\u202f{volume}. \u2014 С.\u202f{pages}.",
-    inText: "({container_title}, {year})",
-  },
-  {
-    id: "dictionary",
-    label: "Словарь",
-    fields: ["editor","title","edition","place","publisher","year","total_pages"],
-    fullNote: "{title} / под ред. {editor}. {edition}-е изд. {place}: {publisher}, {year}. {total_pages} с.",
-    shortNote: "{title}, {pages}.",
-    bibliography: "{title} / под ред. {editor}. \u2014 {edition}-е изд. \u2014 {place}: {publisher}, {year}. \u2014 {total_pages} с.",
-    inText: "({title}, {year})",
-  },
-  {
-    id: "map",
-    label: "Карта / картографический материал",
-    fields: ["author","title","scale","place","publisher","year","url","access_date"],
-    fullNote: "{author}. {title} [Карта]. Масштаб {scale}. {place}: {publisher}, {year}.",
-    shortNote: "{title} ({year}).",
-    bibliography: "{author}. {title} [Карта]. \u2014 Масштаб {scale}. \u2014 {place}: {publisher}, {year}.",
-    inText: "({author}, {year})",
-  },
-  {
-    id: "film",
-    label: "Фильм / видеозапись",
-    fields: ["director","title","producer","studio","place","year","duration","url","access_date"],
-    fullNote: "{title} [Фильм] / реж. {director}. {place}: {studio}, {year}. {duration}.",
-    shortNote: "{title} ({year}).",
-    bibliography: "{title} [Фильм] / реж. {director}. \u2014 {place}: {studio}, {year}.",
-    inText: "({director}, {year})",
-  },
-  {
-    id: "tv",
-    label: "Телепередача / серия",
-    fields: ["author","title","container_title","season","episode","date","network","url","access_date"],
-    fullNote: "{author}. {title} // {container_title}. Сезон {season}, эпизод {episode}. {network}, {date}.",
-    shortNote: "{title}, S{season}E{episode}.",
-    bibliography: "{author}. {title} // {container_title}. \u2014 Сезон {season}, эпизод {episode}. \u2014 {network}, {date}.",
-    inText: "({container_title}, {date})",
-  },
-  {
-    id: "interview",
-    label: "Интервью",
-    fields: ["interviewee","title","interviewer","type","date","place","url","access_date"],
-    fullNote: "{interviewee}. {title}: интервью / интервьюер: {interviewer}. {date}. {place}.",
-    shortNote: "{interviewee}, интервью, {date}.",
-    bibliography: "{interviewee}. {title}: интервью / интервьюер: {interviewer}. \u2014 {date}.",
-    inText: "({interviewee}, {date})",
-  },
-  {
-    id: "letter",
-    label: "Письмо / личная переписка",
-    fields: ["author","recipient","title","date","archive","fond","delo","list"],
-    fullNote: "{author} \u2014 {recipient}. {title}. {date}. {archive}. Ф.\u202f{fond}. Д.\u202f{delo}. Л.\u202f{list}.",
-    shortNote: "{author} \u2014 {recipient}, {date}.",
-    bibliography: "{author}. Письмо {recipient}. {date} // {archive}. Ф.\u202f{fond}. Д.\u202f{delo}.",
-    inText: "({author} \u2014 {recipient}, {date})",
-  },
-  {
-    id: "dataset",
-    label: "Набор данных",
-    fields: ["author","title","version","organization","year","doi","url","access_date"],
-    fullNote: "{author}. {title} [Data set]. Version {version}. {organization}, {year}. DOI:\u202f{doi}.",
-    shortNote: "{author}, {title} ({year}).",
-    bibliography: "{author}. {title} [Data set]. \u2014 {organization}, {year}. \u2014 DOI:\u202f{doi}.",
-    inText: "({author}, {year})",
-  },
-  {
-    id: "software",
-    label: "Программное обеспечение",
-    fields: ["author","title","version","organization","place","year","url","access_date","doi"],
-    fullNote: "{author}. {title} [Computer software]. Version {version}. {place}: {organization}, {year}. URL: {url}.",
-    shortNote: "{title} (v. {version}).",
-    bibliography: "{author}. {title} [Computer software]. \u2014 Version {version}. \u2014 {place}: {organization}, {year}. \u2014 URL: {url}.",
-    inText: "({author}, {year})",
+    label: "Отчёт / рабочий документ",
+    fields: ["author", "year", "title", "number", "institution"],
+    apaTemplate: "{author} ({year}). {title} (Report No. {number}). {institution}.",
   },
 ];
 
 export const SOURCE_TYPE_FIELD_LABELS: Record<string, string> = {
-  author: "Автор", editor: "Редактор", translator: "Переводчик", title: "Название",
-  container_title: "Контейнер (сборник / журнал)", publisher: "Издательство",
-  place: "Место издания", year: "Год", date: "Дата", pages: "Страницы (диапазон)",
-  total_pages: "Объём (стр.)", volume: "Том", issue: "Номер выпуска", edition: "Издание",
-  series: "Серия", doi: "DOI", url: "URL", isbn: "ISBN", access_date: "Дата обращения",
-  archive: "Архив (полное название)", archive_abbr: "Архив (аббревиатура)",
-  fond: "Фонд (Ф.)", fond_title: "Название фонда", opis: "Опись (Оп.)",
-  delo: "Дело (Д.)", list: "Лист (Л.)", list_to: "Лист до", degree: "Научная степень",
-  specialty_code: "Код специальности", institution: "Учреждение", act_number: "Номер акта",
-  act_date: "Дата акта", act_type: "Тип акта (закон, указ…)", article: "Статья",
-  organization: "Организация", report_number: "Номер отчёта", conference_name: "Название конференции",
-  conference_date: "Дата конференции", court: "Суд", case_number: "Номер дела",
-  parties: "Стороны", scale: "Масштаб", director: "Режиссёр", producer: "Продюсер",
-  studio: "Студия", duration: "Продолжительность", season: "Сезон", episode: "Эпизод",
-  network: "Канал", interviewee: "Интервьюируемый", interviewer: "Интервьюер",
-  recipient: "Адресат", version: "Версия", type: "Тип", manuscript: "Рукопись",
+  author:    "Автор(ы)",
+  year:      "Год",
+  title:     "Название",
+  journal:   "Журнал",
+  volume:    "Том",
+  issue:     "Выпуск",
+  pages:     "Страницы",
+  doi:       "DOI",
+  publisher: "Издательство",
+  place:     "Место издания",
+  editor:    "Редактор(ы)",
+  bookTitle: "Название сборника",
+  url:       "URL",
+  accessed:  "Дата обращения",
+  type:      "Тип (дисс. / thesis)",
+  institution: "Учреждение",
+  number:    "Номер отчёта",
 };
 
-export function renderSourceTemplate(template: string, fields: Record<string, string>): string {
-  return template.replace(/\{([\w]+)\}/g, (_, key: string) => {
-    const v = fields[key];
-    if (v && v.trim()) return v;
-    return `\u2039${SOURCE_TYPE_FIELD_LABELS[key] || key}\u203a`;
-  });
-}
-
-export interface FoundItem {
-  id: string;
-  type: "inline-apa" | "inline-numeric" | "footnote" | "bibliography" | "ibid" | "quote";
-  text: string;
-  line: number;
-  start: number;
-  end: number;
-  confidence: number;
-  note?: string;
-}
-
-export interface StyleDetection {
-  style: CitationStyle;
-  confidence: number;
-  reasons: string[];
-  scores: { apa: number; chicago: number };
-}
-
-export interface DocStructure {
-  headings: { line: number; level: number; text: string }[];
-  paragraphs: number;
-  bibliographySection?: { startLine: number; endLine: number };
-  footnotesSection?: { startLine: number; endLine: number };
-  language: "ru" | "en" | "mixed";
-}
-
-export interface EditorIssue {
-  id: string;
-  type:
-    | "длинное-предложение" | "пассив" | "разговорный-маркер"
-    | "слабая-формулировка" | "повтор" | "неопределённый-указатель"
-    | "пунктуация" | "канцелярит";
-  fragment: string;
-  line: number;
-  start: number;
-  end: number;
-  suggestion: string;
-}
-
-export function detectLanguage(text: string): "ru" | "en" | "mixed" {
-  const ruCount = (text.match(/[а-яёА-ЯЁ]/gu) ?? []).length;
-  const enCount = (text.match(/[a-zA-Z]/gu) ?? []).length;
-  const total = ruCount + enCount;
-  if (total === 0) return "ru";
-  const ruRatio = ruCount / total;
-  if (ruRatio > 0.7) return "ru";
-  if (ruRatio < 0.3) return "en";
-  return "mixed";
-}
-
-export function getLineFromIndex(text: string, index: number): number {
-  let line = 1;
-  for (let i = 0; i < index && i < text.length; i++) if (text[i] === "\n") line++;
-  return line;
-}
-
-export function countWords(text: string): number {
-  const trimmed = text.trim();
-  if (!trimmed) return 0;
-  return trimmed.split(/\s+/u).length;
-}
-
-export function countChars(text: string, withSpaces = true): number {
-  return withSpaces ? text.length : text.replace(/\s+/gu, "").length;
-}
-
-const BIBLIOGRAPHY_HEADERS_RU = [
-  "Список литературы", "Список цитированной литературы",
-  "Библиография", "Литература", "Использованная литература",
-  "Источники и литература", "Список источников", "Список использованных источников",
-];
-const BIBLIOGRAPHY_HEADERS_EN = [
-  "References", "Bibliography", "Works Cited", "Works consulted",
-  "List of References", "Sources",
-];
-const BIBLIOGRAPHY_HEADERS = [...BIBLIOGRAPHY_HEADERS_RU, ...BIBLIOGRAPHY_HEADERS_EN];
-
-const FOOTNOTE_HEADERS_RU = ["Сноски", "Примечания", "Комментарии"];
-const FOOTNOTE_HEADERS_EN = ["Notes", "Footnotes", "Endnotes", "Note"];
-const FOOTNOTE_HEADERS = [...FOOTNOTE_HEADERS_RU, ...FOOTNOTE_HEADERS_EN];
-
-export interface SectionRanges {
-  bodyEnd: number;
-  footnotes?: { start: number; end: number };
-  bibliography?: { start: number; end: number };
-}
-
-export function detectSectionRanges(text: string): SectionRanges {
-  const bibStart = findSectionStart(text, BIBLIOGRAPHY_HEADERS);
-  const fnStart  = findSectionStart(text, FOOTNOTE_HEADERS);
-
-  let bibliography: { start: number; end: number } | undefined;
-  let footnotes:    { start: number; end: number } | undefined;
-
-  if (bibStart >= 0) bibliography = { start: bibStart, end: text.length };
-  if (fnStart  >= 0) {
-    const end = bibStart > fnStart ? bibStart : text.length;
-    footnotes = { start: fnStart, end };
+export function renderSourceTemplate(
+  template: SourceTypeTemplate,
+  fields: Record<string, string>,
+): string {
+  let out = template.apaTemplate;
+  for (const [k, v] of Object.entries(fields)) {
+    out = out.replaceAll(`{${k}}`, v || `[${k}]`);
   }
-  if (bibliography && footnotes && footnotes.start > bibliography.start) {
-    bibliography.end = footnotes.start;
+  // Remove unfilled placeholders
+  out = out.replace(/\{[a-zA-Z]+\}/g, "");
+  return out.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Language detection
+// ---------------------------------------------------------------------------
+
+function detectLanguage(text: string): "ru" | "en" | "mixed" {
+  const ruChars = (text.match(/[а-яёА-ЯЁ]/gu) ?? []).length;
+  const enChars = (text.match(/[a-zA-Z]/gu) ?? []).length;
+  const total = ruChars + enChars;
+  if (!total) return "ru";
+  const ratio = ruChars / total;
+  return ratio > 0.7 ? "ru" : ratio < 0.3 ? "en" : "mixed";
+}
+
+// ---------------------------------------------------------------------------
+// Citation finders
+// ---------------------------------------------------------------------------
+
+function lineOf(text: string, pos: number): number {
+  return text.slice(0, pos).split("\n").length;
+}
+
+let _idCounter = 0;
+function nextId(prefix: string): string {
+  return `${prefix}-${++_idCounter}`;
+}
+
+/**
+ * Main heuristic citation finder.
+ * Returns all recognized inline citations, footnotes, bibliography entries,
+ * ibid markers, and direct quotes.
+ */
+export function findCitations(text: string): FoundItem[] {
+  const found: FoundItem[] = [];
+
+  // ── 1. APA inline: (Author, Year) or (Author & Author, Year) ────────────
+  const apaInline =
+    /\((?:[A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s+et al\.?)?),?\s{0,2}(?:19|20)\d{2}(?:[a-z])?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu;
+  for (const m of text.matchAll(apaInline)) {
+    const s = m.index!;
+    found.push({
+      id: nextId("apa"),
+      type: "inline-apa",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.9,
+    });
   }
 
-  let bodyEnd = text.length;
-  if (footnotes && bibliography) bodyEnd = Math.min(footnotes.start, bibliography.start);
-  else if (footnotes)    bodyEnd = footnotes.start;
-  else if (bibliography) bodyEnd = bibliography.start;
+  // ── 2. Harvard inline: (Author Year) without comma ──────────────────────
+  const harvardInline =
+    /\([A-ZА-ЯЁ][a-zа-яё]+(?:\s+et al\.?)?\s+(?:19|20)\d{2}(?:,\s*p\.\s*\d+)?\)/gu;
+  for (const m of text.matchAll(harvardInline)) {
+    const s = m.index!;
+    // Skip if already captured as APA
+    if (found.some((f) => f.start <= s && s < f.end)) continue;
+    found.push({
+      id: nextId("harvard"),
+      type: "inline-apa",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.85,
+      note: "Harvard style",
+    });
+  }
 
-  return { bodyEnd, footnotes, bibliography };
-}
+  // ── 3. GOST inline: [1, с. 12] or [1] or [1–3] ────────────────────────
+  const gostInline = /\[\d+(?:[–—,–]\s*\d+)*(?:,\s*(?:с\.|p\.)\s*\d+(?:[–—-]\d+)?)?\]/gu;
+  for (const m of text.matchAll(gostInline)) {
+    const s = m.index!;
+    if (found.some((f) => f.start <= s && s < f.end)) continue;
+    found.push({
+      id: nextId("num"),
+      type: "inline-numeric",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.9,
+    });
+  }
 
-function isInRange(pos: number, range?: { start: number; end: number }): boolean {
-  return !!range && pos >= range.start && pos < range.end;
-}
+  // ── 4. IEEE / Vancouver numeric: [1] [2,3] ──────────────────────────────
+  const ieeeInline = /\[(?:\d+)(?:,\s*\d+)*\]/gu;
+  for (const m of text.matchAll(ieeeInline)) {
+    const s = m.index!;
+    if (found.some((f) => f.start <= s && s < f.end)) continue;
+    found.push({
+      id: nextId("ieee"),
+      type: "inline-numeric",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.85,
+    });
+  }
 
-function detectImplicitBibliography(text: string, ranges: SectionRanges): { start: number; end: number } | undefined {
-  if (ranges.bibliography) return undefined;
+  // ── 5. Vancouver numeric ranges: (1) (2,3) (5–7) ────────────────────────
+  const vancouverInline = /\(\d+(?:[,;]\s*\d+)*(?:[–—-]\d+)?\)/gu;
+  for (const m of text.matchAll(vancouverInline)) {
+    const s = m.index!;
+    if (found.some((f) => f.start <= s && s < f.end)) continue;
+    // Exclude if looks like year (4 digits)
+    if (/^\((?:19|20)\d{2}\)$/.test(m[0])) continue;
+    found.push({
+      id: nextId("van"),
+      type: "inline-numeric",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.8,
+      note: "Vancouver/numeric",
+    });
+  }
 
-  const lines = text.split("\n");
-  const runs: { startByte: number; endByte: number; lineCount: number }[] = [];
-  let runStart = -1;
-  let runStartByte = 0;
-  let runCount = 0;
-  let tmpCursor = 0;
+  // ── 6. Chicago superscript footnote refs: .[1] or just superscript-like
+  //    We look for patterns like «text».[1] or text.[2]
+  const chicagoRef = /\.\[\d+\]/gu;
+  for (const m of text.matchAll(chicagoRef)) {
+    const s = m.index!;
+    if (found.some((f) => f.start <= s && s < f.end)) continue;
+    found.push({
+      id: nextId("ch"),
+      type: "inline-numeric",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.85,
+      note: "Chicago",
+    });
+  }
 
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    if (isBibEntryLine(raw.trim())) {
-      if (runStart < 0) { runStart = i; runStartByte = tmpCursor; }
-      runCount++;
-    } else {
-      if (runCount >= 3) runs.push({ startByte: runStartByte, endByte: tmpCursor, lineCount: runCount });
-      runStart = -1; runCount = 0;
+  // ── 7. MLA (page-only): (142) (pp. 88) ──────────────────────────────────
+  const mlaInline = /\((?:pp?\.\s*)?\d{1,4}(?:[–—-]\d{1,4})?\)/gu;
+  for (const m of text.matchAll(mlaInline)) {
+    const s = m.index!;
+    if (found.some((f) => f.start <= s && s < f.end)) continue;
+    found.push({
+      id: nextId("mla"),
+      type: "inline-numeric",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.75,
+      note: "MLA page ref",
+    });
+  }
+
+  // ── 8. Ibid / Там же ─────────────────────────────────────────────────────
+  const ibid = /\b(?:Ibid\.?|Там же|там же|ibidem)\b/gu;
+  for (const m of text.matchAll(ibid)) {
+    const s = m.index!;
+    if (found.some((f) => f.start <= s && s < f.end)) continue;
+    found.push({
+      id: nextId("ibid"),
+      type: "ibid",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.95,
+    });
+  }
+
+  // ── 9. Direct quotes ─────────────────────────────────────────────────────
+  const quotePatterns = [
+    /«[^»]{10,300}»/gu,
+    /\u201c[^\u201d]{10,300}\u201d/gu,
+    /"[A-ZА-ЯЁ][^"]{15,300}"/gu,
+  ];
+  for (const re of quotePatterns) {
+    for (const m of text.matchAll(re)) {
+      const s = m.index!;
+      if (found.some((f) => f.start <= s && s < f.end)) continue;
+      found.push({
+        id: nextId("q"),
+        type: "quote",
+        text: m[0],
+        start: s,
+        end: s + m[0].length,
+        line: lineOf(text, s),
+        confidence: 0.85,
+      });
     }
-    tmpCursor += raw.length + 1;
   }
-  if (runCount >= 3) runs.push({ startByte: runStartByte, endByte: tmpCursor, lineCount: runCount });
-  if (!runs.length) return undefined;
 
-  const last = runs[runs.length - 1];
-  if (last.startByte < text.length * 0.4) return undefined;
-  return { start: last.startByte, end: last.endByte };
+  // ── 10. Author-only custom style: {Author Year: page} ────────────────────
+  const customInline = /\{[A-ZА-ЯЁ][a-zа-яё]+\s+(?:19|20)\d{2}(?::\s*\d+)?\}/gu;
+  for (const m of text.matchAll(customInline)) {
+    const s = m.index!;
+    if (found.some((f) => f.start <= s && s < f.end)) continue;
+    found.push({
+      id: nextId("cust"),
+      type: "inline-apa",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.8,
+      note: "Custom/author style",
+    });
+  }
+
+  // ── 11. Footnote entries (lines starting with digit+dot at line start) ───
+  const lines = text.split("\n");
+  let lineStart = 0;
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li];
+    const trimmed = raw.trimStart();
+    // Match lines that look like footnote entries: "1. Text" or "¹ Text"
+    if (
+      /^\d+[.)\s]\s+\S/.test(trimmed) &&
+      trimmed.length > 20 &&
+      !found.some((f) => f.start <= lineStart && lineStart < f.end)
+    ) {
+      const s = lineStart + (raw.length - raw.trimStart().length);
+      const e = lineStart + raw.length;
+      found.push({
+        id: nextId("fn"),
+        type: "footnote",
+        text: trimmed,
+        start: s,
+        end: e,
+        line: li + 1,
+        confidence: 0.8,
+      });
+    }
+    // Superscript footnote markers like ¹ or ²
+    for (const m of raw.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹]/gu)) {
+      const s = lineStart + m.index!;
+      found.push({
+        id: nextId("sup"),
+        type: "footnote",
+        text: m[0],
+        start: s,
+        end: s + 1,
+        line: li + 1,
+        confidence: 0.7,
+        note: "Superscript marker",
+      });
+    }
+    lineStart += raw.length + 1;
+  }
+
+  // ── 12. Bibliography entries ─────────────────────────────────────────────
+  lineStart = 0;
+  let inBibSection = false;
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li];
+    const trimmed = raw.trim();
+    if (
+      BIBLIOGRAPHY_HEADERS.some((h) => h.toLowerCase() === trimmed.toLowerCase())
+    ) {
+      inBibSection = true;
+    }
+    if (inBibSection && trimmed.length > 30 && isBibEntryLine(trimmed)) {
+      const s = lineStart;
+      const e = lineStart + raw.length;
+      if (!found.some((f) => f.start === s)) {
+        found.push({
+          id: nextId("bib"),
+          type: "bibliography",
+          text: trimmed,
+          start: s,
+          end: e,
+          line: li + 1,
+          confidence: 0.85,
+        });
+      }
+    }
+    lineStart += raw.length + 1;
+  }
+
+  return found.sort((a, b) => a.start - b.start);
 }
 
 function isBibEntryLine(line: string): boolean {
   if (line.length < 30) return false;
-  if (!/^[A-ZА-ЯЁ\[]/u.test(line)) return false;
+  if (!/^[A-ZА-ЯЁ\[]/.test(line)) return false;
   let signals = 0;
   if (/\b(19|20)\d{2}\b/.test(line)) signals++;
   if (/\b[pP]p?\.\s*\d|С\.\s*\d|стр\.\s*\d|\d+\s*[–—-]\s*\d+/.test(line)) signals++;
   if (/https?:\/\//.test(line)) signals++;
-  if (/[A-ZА-ЯЁ][a-zа-яё]{2,}[,:]/u.test(line)) signals++;
-  if (/\.\s+[A-ZА-ЯЁ]/u.test(line)) signals++;
+  if (/[A-ZА-ЯЁ][a-zа-яё]{2,}[,:]/.test(line)) signals++;
+  if (/\.\s+[A-ZА-ЯЁ]/.test(line)) signals++;
   return signals >= 2;
 }
 
-const APA_INLINE_GROUP = /\(([^()\n]{1,120}?\d{4}[a-z]?[^()\n]{0,60}?)\)/gu;
-const IBID_RE = /\b(?:Ibid\.?|Там же|Тамже)\b/gu;
-const QUOTE_RE = /[«"](.+?)[»"]\s*\(([^)\n]+)\)/gu;
+// ---------------------------------------------------------------------------
+// Style detection
+// ---------------------------------------------------------------------------
 
-export function findCitations(text: string): FoundItem[] {
-  const items: FoundItem[] = [];
-  let idx = 0;
-  const ranges = detectSectionRanges(text);
-  const implicitBib = detectImplicitBibliography(text, ranges);
-  if (implicitBib && !ranges.bibliography) ranges.bibliography = implicitBib;
-
-  const inBody = (pos: number) =>
-    !isInRange(pos, ranges.footnotes) && !isInRange(pos, ranges.bibliography);
-
-  for (const m of text.matchAll(APA_INLINE_GROUP)) {
-    const start = m.index ?? 0;
-    const inner = m[1];
-    if (!inBody(start)) continue;
-    if (!/\d{4}/.test(inner)) continue;
-    if (inner.length > 80) continue;
-    const charBefore = start > 0 ? text[start - 1] : " ";
-    if (charBefore === ".") continue;
-    if (/^\d{4}[a-z]?$/i.test(inner.trim())) continue;
-
-    items.push({
-      id: `apa-${idx++}`,
-      type: "inline-apa",
-      text: m[0],
-      line: getLineFromIndex(text, start),
-      start,
-      end: start + m[0].length,
-      confidence: 0.86,
-    });
-  }
-
-  for (const m of text.matchAll(
-    /\[(\d{1,3})(?:\s*[,\u2013\u2014-]\s*(?:\u0441\.\s*\d+(?:[\u2013\u2014-]\d+)?|\u0441\u0442\u0440\.\s*\d+(?:[\u2013\u2014-]\d+)?|p\.\s*\d+(?:[\u2013\u2014-]\d+)?|pp\.\s*\d+(?:[\u2013\u2014-]\d+)?|\d{1,3}))?\]/gu
-  )) {
-    const start = m.index ?? 0;
-    if (!inBody(start)) continue;
-    items.push({
-      id: `num-${idx++}`,
-      type: "inline-numeric",
-      text: m[0],
-      line: getLineFromIndex(text, start),
-      start,
-      end: start + m[0].length,
-      confidence: 0.78,
-    });
-  }
-
-  for (const m of text.matchAll(IBID_RE)) {
-    const start = m.index ?? 0;
-    if (!isInRange(start, ranges.footnotes) && !isInRange(start, ranges.bibliography)) continue;
-    items.push({
-      id: `ibid-${idx++}`,
-      type: "ibid",
-      text: m[0],
-      line: getLineFromIndex(text, start),
-      start,
-      end: start + m[0].length,
-      confidence: 0.74,
-    });
-  }
-
-  for (const m of text.matchAll(QUOTE_RE)) {
-    const start = m.index ?? 0;
-    items.push({
-      id: `quote-${idx++}`,
-      type: "quote",
-      text: m[0],
-      line: getLineFromIndex(text, start),
-      start,
-      end: start + m[0].length,
-      confidence: 0.72,
-    });
-  }
-
-  const lines = text.split("\n");
-  let absoluteOffset = 0;
-  let inBib = false;
-  let inFoot = false;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    if (BIBLIOGRAPHY_HEADERS.some((h) => trimmed.toLowerCase() === h.toLowerCase())) {
-      inBib = true; inFoot = false;
-      absoluteOffset += line.length + 1;
-      continue;
-    }
-    if (FOOTNOTE_HEADERS.some((h) => trimmed.toLowerCase() === h.toLowerCase())) {
-      inFoot = true; inBib = false;
-      absoluteOffset += line.length + 1;
-      continue;
-    }
-
-    if (inBib && trimmed) {
-      items.push({
-        id: `bib-${idx++}`,
-        type: "bibliography",
-        text: trimmed,
-        line: i + 1,
-        start: absoluteOffset + line.indexOf(trimmed),
-        end: absoluteOffset + line.indexOf(trimmed) + trimmed.length,
-        confidence: 0.81,
-      });
-    }
-
-    if (inFoot && /^\s*\d+[.)]/.test(line)) {
-      items.push({
-        id: `fn-${idx++}`,
-        type: "footnote",
-        text: trimmed,
-        line: i + 1,
-        start: absoluteOffset + line.indexOf(trimmed),
-        end: absoluteOffset + line.indexOf(trimmed) + trimmed.length,
-        confidence: 0.8,
-      });
-    }
-
-    absoluteOffset += line.length + 1;
-  }
-
-  if (!items.some((x) => x.type === "bibliography") && ranges.bibliography) {
-    const bibText = text.slice(ranges.bibliography.start, ranges.bibliography.end);
-    const bibLines = bibText.split("\n");
-    let off = ranges.bibliography.start;
-    for (const line of bibLines) {
-      const trimmed = line.trim();
-      if (trimmed && isBibEntryLine(trimmed)) {
-        const start = off + line.indexOf(trimmed);
-        items.push({
-          id: `bib-${idx++}`,
-          type: "bibliography",
-          text: trimmed,
-          line: getLineFromIndex(text, start),
-          start,
-          end: start + trimmed.length,
-          confidence: 0.75,
-        });
-      }
-      off += line.length + 1;
-    }
-  }
-
-  return items.sort((a, b) => a.start - b.start);
+interface StyleScore {
+  style: string;
+  score: number;
 }
 
-export function detectStyle(text: string, found: FoundItem[]): {
-  style: CitationStyle;
-  confidence: number;
-  scores: { style: CitationStyle; score: number }[];
-  notes: string[];
-} {
-  let apa = 0, chicago = 0, mla = 0, ieee = 0, vancouver = 0, harvard = 0, gost = 0;
+export function detectStyle(
+  text: string,
+  found: FoundItem[],
+): { style: CitationStyle; confidence: number; scores: StyleScore[]; notes: string[] } {
+  const scores: StyleScore[] = [];
   const notes: string[] = [];
 
-  const apaInline  = found.filter(f => f.type === "inline-apa").length;
-  const numeric    = found.filter(f => f.type === "inline-numeric").length;
-  const footnotes  = found.filter(f => f.type === "footnote").length;
-  const bibEntries = found.filter(f => f.type === "bibliography").length;
-  const ibidCount  = found.filter(f => f.type === "ibid").length;
+  const apaCount    = found.filter((f) => f.type === "inline-apa").length;
+  const numCount    = found.filter((f) => f.type === "inline-numeric").length;
+  const ibidCount   = found.filter((f) => f.type === "ibid").length;
+  const bibCount    = found.filter((f) => f.type === "bibliography").length;
+  const footnoteCount = found.filter((f) => f.type === "footnote").length;
 
-  if (apaInline > 0)  { apa += apaInline * 1.6; harvard += apaInline * 1.4; notes.push(`Автор-год вставок: ${apaInline}`); }
-  if (numeric   > 0)  { chicago += numeric * 1.5; ieee += numeric * 1.6; vancouver += numeric * 1.5; notes.push(`Числовых маркеров: ${numeric}`); }
-  if (footnotes > 0)  { chicago += footnotes * 1.6; gost += footnotes * 1.4; notes.push(`Сносок: ${footnotes}`); }
-  if (ibidCount > 0)  { chicago += ibidCount * 1.8; gost += ibidCount * 1.2; notes.push(`Ibid./Там же: ${ibidCount}`); }
-  if (bibEntries > 0) { notes.push(`Библиографических строк: ${bibEntries}`); }
+  // APA
+  let apaScore = 0;
+  apaScore += Math.min(apaCount * 0.15, 0.5);
+  apaScore += Math.min(bibCount * 0.08, 0.3);
+  if (/\(\w+(?:\s*&\s*\w+)?(?:,\s*et al\.?)?\s*,\s*(?:19|20)\d{2}/.test(text)) apaScore += 0.15;
+  if (/\bDOI:\s*10\./.test(text)) apaScore += 0.05;
+  scores.push({ style: "APA", score: Math.min(apaScore, 1) });
 
-  const lines = text.split("\n");
-  const bibliographyLines = lines.filter(l => isBibEntryLine(l.trim()));
-  for (const line of bibliographyLines) {
-    if (/\bvol\.\b|\bno\.\b|Retrieved from\b|https?:\/\//i.test(line)) apa += 0.7;
-    if (/\bpp?\.\s*\d+/i.test(line)) mla += 0.4;
-    if (/№\s*\d+|Т\.\s*\d+|С\.\s*\d+/u.test(line)) gost += 0.8;
-    if (/\d+\.$/.test(line.trim())) vancouver += 0.3;
-  }
+  // Chicago
+  let chicagoScore = 0;
+  chicagoScore += Math.min(ibidCount * 0.2, 0.4);
+  chicagoScore += Math.min(footnoteCount * 0.1, 0.3);
+  if (/\.\[\d+\]/.test(text)) chicagoScore += 0.2;
+  if (/\bIbid\./.test(text)) chicagoScore += 0.15;
+  scores.push({ style: "Chicago", score: Math.min(chicagoScore, 1) });
 
-  if (/[А-Яа-яЁё]/u.test(text) && /\bURL:|\bдата обращения|\bТ\.\s*\d+|№\s*\d+/u.test(text)) gost += 1.0;
-  if (/References\n/i.test(text) || /Retrieved from/i.test(text)) apa += 0.8;
-  if (/Works Cited/i.test(text)) mla += 1.2;
-  if (/Bibliography/i.test(text) && ibidCount > 0) chicago += 0.8;
+  // MLA
+  let mlaScore = 0;
+  mlaScore += Math.min(found.filter((f) => f.note === "MLA page ref").length * 0.15, 0.45);
+  if (/Works Cited/i.test(text)) { mlaScore += 0.3; notes.push("Найден раздел Works Cited"); }
+  if (/\(\w+\s+\d{1,4}\)/.test(text)) mlaScore += 0.1;
+  scores.push({ style: "MLA", score: Math.min(mlaScore, 1) });
 
-  const scorePairs: { style: CitationStyle; score: number }[] = [
-    { style: "APA",       score: apa },
-    { style: "Chicago",   score: chicago },
-    { style: "MLA",       score: mla },
-    { style: "IEEE",      score: ieee },
-    { style: "Vancouver", score: vancouver },
-    { style: "Harvard",   score: harvard },
-    { style: "GOST",      score: gost },
-  ].sort((a, b) => b.score - a.score);
+  // IEEE
+  let ieeeScore = 0;
+  if (/\[\d+\]/.test(text)) ieeeScore += 0.25;
+  ieeeScore += Math.min(found.filter((f) => f.note === "Chicago" || f.type === "inline-numeric").length * 0.1, 0.3);
+  if (/IEEE/.test(text) || /Trans\./.test(text) || /Proc\./.test(text)) ieeeScore += 0.2;
+  scores.push({ style: "IEEE", score: Math.min(ieeeScore, 1) });
 
-  const best = scorePairs[0];
-  const second = scorePairs[1] ?? { score: 0 };
-  const total = scorePairs.reduce((s, x) => s + x.score, 0) || 1;
-  const confidence = Math.min(0.99, Math.max(0.25, (best.score - second.score) / total + best.score / (total + 2)));
+  // Vancouver
+  let vanScore = 0;
+  vanScore += Math.min(found.filter((f) => f.note === "Vancouver/numeric").length * 0.12, 0.4);
+  if (/Lancet|NEJM|BMJ|Ann Rheum/.test(text)) { vanScore += 0.25; notes.push("Медицинское издание"); }
+  if (/\(\d+(?:[,;]\s*\d+)*\)/.test(text)) vanScore += 0.1;
+  scores.push({ style: "Vancouver", score: Math.min(vanScore, 1) });
+
+  // Harvard
+  let harvardScore = 0;
+  harvardScore += Math.min(found.filter((f) => f.note === "Harvard style").length * 0.15, 0.45);
+  if (/[Hh]arvard/.test(text)) harvardScore += 0.1;
+  if (/,\s*vol\.\s*\d+,\s*no\.\s*\d+,\s*pp\./.test(text)) harvardScore += 0.2;
+  scores.push({ style: "Harvard", score: Math.min(harvardScore, 1) });
+
+  // GOST
+  let gostScore = 0;
+  gostScore += Math.min(found.filter((f) => f.type === "inline-numeric").length * 0.1, 0.3);
+  if (/[–—]\s*[МСПб]\.\s*:/u.test(text)) { gostScore += 0.3; notes.push("ГОСТ: место изд. М./СПб."); }
+  if (/ГОСТ|Собрание законодательства|Вопросы государственного/.test(text)) gostScore += 0.2;
+  if (/\[Электронный ресурс\]/.test(text)) { gostScore += 0.2; notes.push("ГОСТ: [Электронный ресурс]"); }
+  scores.push({ style: "GOST", score: Math.min(gostScore, 1) });
+
+  // Custom
+  let customScore = 0;
+  if (/\{[A-ZА-ЯЁ][a-zа-яё]+\s+(?:19|20)\d{2}/.test(text)) { customScore += 0.5; notes.push("Нестандартный формат {Автор Год}"); }
+  scores.push({ style: "Custom", score: Math.min(customScore, 1) });
+
+  const sorted = [...scores].sort((a, b) => b.score - a.score);
+  const best = sorted[0];
+  const second = sorted[1];
+  const confidence = best.score > 0 ? Math.min((best.score - (second?.score ?? 0) + 0.1) * 1.5, 1) : 0;
+
+  if (apaCount > 0) notes.push(`APA-вставок: ${apaCount}`);
+  if (ibidCount > 0) notes.push(`Ibid/Там же: ${ibidCount}`);
+  if (numCount > 0) notes.push(`Числовых ссылок: ${numCount}`);
 
   return {
-    style: best.score > 0 ? best.style : "Unknown",
+    style: (best.score > 0.05 ? best.style : "Unknown") as CitationStyle,
     confidence,
-    scores: scorePairs,
+    scores: sorted,
     notes,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Citation converter
+// ---------------------------------------------------------------------------
+
+export function convertCitations(
+  text: string,
+  target: CitationStyle,
+  customRules: CustomCitationRules,
+): { text: string; converted: number; warnings: string[] } {
+  let out = text;
+  let converted = 0;
+  const warnings: string[] = [];
+
+  switch (target) {
+    case "APA": {
+      // Numeric [1] → (Source 1, 2020) placeholder
+      out = out.replace(/\[(\d+)\]/g, (_m, n) => {
+        converted++;
+        return `(Source ${n}, 2020)`;
+      });
+      // Chicago footnote ref .[1] → (Source 1, 2020)
+      out = out.replace(/\.\[(\d+)\]/g, (_m, n) => {
+        converted++;
+        return ` (Source ${n}, 2020).`;
+      });
+      break;
+    }
+    case "Chicago": {
+      // APA (Author, Year) → Footnote style Author, Year.
+      out = out.replace(
+        /\(([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*)?,?\s*((?:19|20)\d{2}[a-z]?)\)/gu,
+        (_m, author, year) => { converted++; return `${author || "Author"}, ${year}.`; },
+      );
+      break;
+    }
+    case "MLA": {
+      // APA (Author, Year) → (Author page)
+      out = out.replace(
+        /\(([A-ZА-ЯЁ][a-zа-яё]+)(?:,\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+        (_m, author) => { converted++; return `(${author} 00)`; },
+      );
+      break;
+    }
+    case "IEEE": {
+      // APA → numeric placeholder [n]
+      let n = 1;
+      out = out.replace(
+        /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+        () => { converted++; return `[${n++}]`; },
+      );
+      break;
+    }
+    case "Vancouver": {
+      // APA → (n)
+      let n = 1;
+      out = out.replace(
+        /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+        () => { converted++; return `(${n++})`; },
+      );
+      break;
+    }
+    case "Harvard": {
+      // APA (Author, Year) → (Author Year)
+      out = out.replace(
+        /\(([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*)?,?\s*((?:19|20)\d{2}[a-z]?)(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+        (_m, author, year) => { converted++; return `(${author || "Author"} ${year})`; },
+      );
+      break;
+    }
+    case "GOST": {
+      // APA → [n]
+      let n = 1;
+      out = out.replace(
+        /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+        (_inner) => { converted++; return `[${n++}]`; },
+      );
+      break;
+    }
+    case "Custom": {
+      const tpl = customRules.inlineTemplate;
+      let n = 1;
+      out = out.replace(
+        /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*((?:19|20)\d{2}[a-z]?)(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+        (_m, year) => {
+          converted++;
+          return tpl
+            .replace("{author}", "Author")
+            .replace("{year}", year)
+            .replace("{n}", String(n++));
+        },
+      );
+      break;
+    }
+    default:
+      break;
+  }
+
+  if (converted === 0) {
+    warnings.push(
+      "Не удалось автоматически преобразовать цитаты. " +
+        "Возможно, документ уже использует целевой стиль или формат не распознан.",
+    );
+  }
+
+  return { text: out, converted, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// Structure analysis
+// ---------------------------------------------------------------------------
 
 export function analyzeStructure(text: string): ReturnType<typeof buildStructure> {
   return buildStructure(text);
@@ -673,7 +684,7 @@ export function analyzeStructure(text: string): ReturnType<typeof buildStructure
 
 function buildStructure(text: string) {
   const lines = text.split("\n");
-  const headings: { line: number; level: number; text: string }[] = [];
+  const headings: { line: number; level: number; text: string; title?: string }[] = [];
   let paragraphs = 0;
   let bibliographySection: { startLine: number; endLine: number } | undefined;
   let footnotesSection: { startLine: number; endLine: number } | undefined;
@@ -688,7 +699,11 @@ function buildStructure(text: string) {
     if (/^(#{1,6})\s+/.test(line)) {
       const level = line.match(/^(#{1,6})/)?.[1].length ?? 1;
       headings.push({ line: i + 1, level, text: line.replace(/^#{1,6}\s+/, "") });
-    } else if (/^\d+(?:\.\d+)*\.?\s+[A-ZА-ЯЁ]/u.test(line) || /^[A-ZА-ЯЁ][A-ZА-ЯЁ\s-]{4,}$/u.test(line)) {
+    } else if (
+      // Require at least a two-part number (1.2 ...) to avoid matching footnote entries (1. Author...)
+      /^\d+\.\d+(?:\.\d+)*\.?\s+[A-ZА-ЯЁ]/u.test(line) ||
+      /^[A-ZА-ЯЁ][A-ZА-ЯЁ\s-]{4,}$/u.test(line)
+    ) {
       headings.push({ line: i + 1, level: 2, text: line });
     }
 
@@ -713,201 +728,174 @@ function buildStructure(text: string) {
 
 function findSectionStart(text: string, names: string[]): number {
   const lines = text.split("\n");
-  let pos = 0;
-  for (const line of lines) {
-    if (names.some((n) => n.toLowerCase() === line.trim().toLowerCase())) return pos;
-    pos += line.length + 1;
+  for (let i = 0; i < lines.length; i++) {
+    if (names.some((n) => n.toLowerCase() === lines[i].trim().toLowerCase())) return i + 1;
   }
   return -1;
 }
 
+// ---------------------------------------------------------------------------
+// Editor issues
+// ---------------------------------------------------------------------------
+
 export function findEditorIssues(text: string): EditorIssue[] {
   const issues: EditorIssue[] = [];
-  let idx = 0;
+  const sentences = splitSentences(text);
 
-  for (const m of text.matchAll(/[^.!?\n]+[.!?]+/gu)) {
-    const sentence = m[0];
-    const words = countWords(sentence);
-    if (words > 35) {
-      const start = m.index ?? 0;
+  for (const { s, start } of sentences) {
+    const words = s.split(/\s+/).filter(Boolean);
+
+    // Long sentence
+    if (words.length > 40) {
       issues.push({
-        id: `issue-${idx++}`,
+        id: `iss-${issues.length}`,
         type: "длинное-предложение",
-        fragment: sentence.trim(),
-        line: getLineFromIndex(text, start),
+        text: s.slice(0, 120) + (s.length > 120 ? "…" : ""),
         start,
-        end: start + sentence.length,
-        suggestion: "Разбейте предложение на 2–3 более коротких.",
+        end: start + s.length,
+        line: lineOf(text, start),
+        suggestion: "Разбейте на два предложения.",
       });
     }
-  }
 
-  const PASSIVE_HINTS = /\b(?:был(?:а|о|и)?|были|является|являлись|осуществляется|производится|рассматривается|определяется)\b/gu;
-  for (const m of text.matchAll(PASSIVE_HINTS)) {
-    const start = m.index ?? 0;
-    issues.push({
-      id: `issue-${idx++}`,
-      type: "пассив",
-      fragment: m[0],
-      line: getLineFromIndex(text, start),
-      start,
-      end: start + m[0].length,
-      suggestion: "По возможности замените пассивную конструкцию активной.",
-    });
-  }
-
-  for (const m of text.matchAll(/(?:^|[.!?]\s+|\n\s*)(Это|То|Тот|Эта|Эти|Данный|Вышеуказанный)\s+/gu)) {
-    const start = (m.index ?? 0) + m[0].search(/(Это|То|Тот|Эта|Эти|Данный|Вышеуказанный)/u);
-    issues.push({
-      id: `issue-${idx++}`,
-      type: "неопределённый-указатель",
-      fragment: m[1],
-      line: getLineFromIndex(text, start),
-      start,
-      end: start + m[1].length,
-      suggestion: "Уточните, к какому объекту относится указательное слово.",
-    });
-  }
-
-  const seen = new Map<string, number[]>();
-  for (const m of text.matchAll(/[А-Яа-яЁёA-Za-z]{5,}/gu)) {
-    const word = m[0].toLowerCase();
-    const start = m.index ?? 0;
-    const arr = seen.get(word) ?? [];
-    arr.push(start);
-    seen.set(word, arr);
-  }
-  for (const [word, positions] of seen) {
-    if (positions.length >= 3) {
-      const start = positions[1];
+    // Passive voice (Russian)
+    if (/\b(?:был[аои]?|были|будет|будут|является|являются|являлся|считается|рассматривается)\s+\w+[нт][а-я]{0,3}\b/u.test(s)) {
       issues.push({
-        id: `issue-${idx++}`,
-        type: "повтор",
-        fragment: word,
-        line: getLineFromIndex(text, start),
+        id: `iss-${issues.length}`,
+        type: "пассив",
+        text: s.slice(0, 100),
         start,
-        end: start + word.length,
-        suggestion: "Проверьте, не стоит ли заменить повтор синонимом или местоимением.",
+        end: start + s.length,
+        line: lineOf(text, start),
+        suggestion: "Рассмотрите активный залог.",
       });
     }
-  }
 
-  const COLLOQ = ["как бы", "вообще", "ну", "в принципе", "типа", "по сути"];
-  for (const phrase of COLLOQ) {
-    const re = new RegExp(`\\b${phrase.replace(/ /g, "\\s+")}\\b`, "giu");
-    for (const m of text.matchAll(re)) {
-      const start = m.index ?? 0;
-      issues.push({
-        id: `issue-${idx++}`,
-        type: "разговорный-маркер",
-        fragment: m[0],
-        line: getLineFromIndex(text, start),
-        start,
-        end: start + m[0].length,
-        suggestion: "Уберите разговорный маркер или замените нейтральной формулировкой.",
-      });
-    }
-  }
-
-  for (const m of text.matchAll(/  +/gu)) {
-    const start = m.index ?? 0;
-    issues.push({
-      id: `issue-${idx++}`,
-      type: "пунктуация",
-      fragment: "двойной пробел",
-      line: getLineFromIndex(text, start),
-      start,
-      end: start + m[0].length,
-      suggestion: "Удалите лишние пробелы.",
-    });
-  }
-
-  const BUREAUCRATIC = ["в рамках", "осуществление", "производить анализ", "настоящий", "данный факт"];
-  for (const phrase of BUREAUCRATIC) {
-    const re = new RegExp(`\\b${phrase.replace(/ /g, "\\s+")}\\b`, "giu");
-    for (const m of text.matchAll(re)) {
-      const start = m.index ?? 0;
-      issues.push({
-        id: `issue-${idx++}`,
-        type: "канцелярит",
-        fragment: m[0],
-        line: getLineFromIndex(text, start),
-        start,
-        end: start + m[0].length,
-        suggestion: "Переформулируйте проще и конкретнее.",
-      });
-    }
-  }
-
-  return issues.sort((a, b) => a.start - b.start);
-}
-
-export function convertCitations(text: string, target: CitationStyle, customRules?: CustomCitationRules): { text: string; converted: number; warnings: string[] } {
-  const warnings: string[] = [];
-  let converted = 0;
-  let out = text;
-
-  if (target === "APA") {
-    out = out.replace(/\[(\d+)\]/gu, (_m, n) => { converted++; return `(Source ${n}, 2020)`; });
-  } else if (target === "Chicago") {
-    out = out.replace(/\(([^()\n]{1,120}?\d{4}[a-z]?[^()\n]{0,60}?)\)/gu, (_m, inner) => {
-      converted++; return `${inner}.`;
-    });
-  } else if (target === "IEEE" || target === "Vancouver") {
-    let counter = 1;
-    out = out.replace(/\(([^()\n]{1,120}?\d{4}[a-z]?[^()\n]{0,60}?)\)/gu, () => `[${counter++}]`);
-  } else if (target === "GOST") {
-    out = out.replace(/\(([^()\n]{1,120}?\d{4}[a-z]?[^()\n]{0,60}?)\)/gu, (_m, _inner) => { converted++; return `[1]`; });
-  } else if (target === "Custom" && customRules) {
-    const lines = out.split("\n");
-    let changes = 0;
-    let absoluteOffset = 0;
-    const found = findCitations(out)
-      .filter(it => it.type !== "quote")
-      .filter(it => it.type !== "inline-numeric")
-      .sort((a, b) => a.start - b.start);
-    for (const item of found) {
-      const lineIdx = getLineFromIndex(out, item.start) - 1;
-      const localLine = lines[lineIdx];
-      if (!localLine) continue;
-      const lineStartAbs = absoluteOffset;
-      const relStart = item.start - lineStartAbs;
-      const relEnd = item.end - lineStartAbs;
-      if (relStart < 0 || relEnd > localLine.length) {
-        absoluteOffset += localLine.length + 1;
-        continue;
+    // Colloquial markers
+    const colloquial = [
+      /\bпо-видимому\b/iu,
+      /\bна самом деле\b/iu,
+      /\bтак сказать\b/iu,
+      /\bкак бы\b/iu,
+      /\bну и\b/iu,
+      /\bпросто\b/iu,
+    ];
+    for (const re of colloquial) {
+      if (re.test(s)) {
+        issues.push({
+          id: `iss-${issues.length}`,
+          type: "разговорный-маркер",
+          text: s.slice(0, 100),
+          start,
+          end: start + s.length,
+          line: lineOf(text, start),
+          suggestion: "Замените академическим эквивалентом.",
+        });
+        break;
       }
-      const replacement = customRules.mode === "numeric"
-        ? customRules.inlineTemplate.replace(/\{n\}/g, String(changes + 1))
-        : customRules.mode === "footnote"
-        ? customRules.footnoteTemplate.replace(/\{n\}/g, String(changes + 1))
-        : customRules.inlineTemplate
-          .replace(/\{author\}/g, "Автор")
-          .replace(/\{year\}/g, "2024")
-          .replace(/\{title\}/g, "Название");
-      lines[lineIdx] = localLine.slice(0, relStart) + replacement + localLine.slice(relEnd);
-      changes++;
-      absoluteOffset += localLine.length + 1;
     }
-    return { text: lines.join("\n"), converted: changes, warnings };
+
+    // Weak formulations
+    const weak = [
+      /\bможно считать\b/iu,
+      /\bнекоторым образом\b/iu,
+      /\bв той или иной мере\b/iu,
+      /\bв какой-то степени\b/iu,
+      /\bдостаточно [а-я]+\b/iu,
+    ];
+    for (const re of weak) {
+      if (re.test(s)) {
+        issues.push({
+          id: `iss-${issues.length}`,
+          type: "слабая-формулировка",
+          text: s.slice(0, 100),
+          start,
+          end: start + s.length,
+          line: lineOf(text, start),
+          suggestion: "Уточните формулировку.",
+        });
+        break;
+      }
+    }
+
+    // Vague pointer
+    if (/\bэтого?\b|\bданного?\b|\bтаких?\b/iu.test(s) && words.length < 10) {
+      issues.push({
+        id: `iss-${issues.length}`,
+        type: "неопределённый-указатель",
+        text: s.slice(0, 100),
+        start,
+        end: start + s.length,
+        line: lineOf(text, start),
+        suggestion: "Уточните, к чему относится указатель.",
+      });
+    }
+
+    // Chancellery style (канцелярит)
+    const kancelary = [
+      /\bв целях\b/iu,
+      /\bв рамках\b/iu,
+      /\bосуществление\b/iu,
+      /\bреализация мер\b/iu,
+      /\bв соответствии с\b/iu,
+      /\bна основании вышеизложенного\b/iu,
+    ];
+    for (const re of kancelary) {
+      if (re.test(s)) {
+        issues.push({
+          id: `iss-${issues.length}`,
+          type: "канцелярит",
+          text: s.slice(0, 100),
+          start,
+          end: start + s.length,
+          line: lineOf(text, start),
+          suggestion: "Упростите канцелярский оборот.",
+        });
+        break;
+      }
+    }
   }
 
-  if (converted === 0) warnings.push("Не удалось автоматически преобразовать все цитаты — проверьте вручную.");
-  return { text: out, converted, warnings };
+  // Repetitions (same word in adjacent sentences)
+  const sentTexts = sentences.map((s) => s.s.toLowerCase());
+  for (let i = 1; i < sentTexts.length; i++) {
+    const words1 = new Set(sentTexts[i - 1].match(/[а-яёa-z]{5,}/gu) ?? []);
+    const words2 = sentTexts[i].match(/[а-яёa-z]{5,}/gu) ?? [];
+    const repeated = words2.filter((w) => words1.has(w));
+    if (repeated.length >= 3) {
+      const { s, start } = sentences[i];
+      issues.push({
+        id: `iss-${issues.length}`,
+        type: "повтор",
+        text: s.slice(0, 100),
+        start,
+        end: start + s.length,
+        line: lineOf(text, start),
+        suggestion: `Повторяются слова: ${repeated.slice(0, 3).join(", ")}.`,
+      });
+    }
+  }
+
+  return issues;
 }
 
-export function normalizeFoundItems(items: FoundItem[]): FoundItem[] {
-  return items
-    .slice()
-    .sort((a, b) => a.start - b.start)
-    .filter((item, index, arr) => {
-      if (index === 0) return true;
-      const prev = arr[index - 1];
-      return !(item.start === prev.start && item.end === prev.end && item.type === prev.type);
-    });
+function splitSentences(text: string): { s: string; start: number }[] {
+  const result: { s: string; start: number }[] = [];
+  const re = /[^.!?\n]+[.!?]+/gu;
+  for (const m of text.matchAll(re)) {
+    result.push({ s: m[0].trim(), start: m.index! });
+  }
+  return result;
 }
 
-export function convertFoundItemsToPreview(text: string, items: FoundItem[], target: CitationStyle, customRules?: CustomCitationRules): { target: CitationStyle; changes: number; preview: string } {
-  const result = convertCitations(text, target, customRules);
-  return { target, changes: result.converted, preview: result.text };
+// ---------------------------------------------------------------------------
+// Word / char counters
+// ---------------------------------------------------------------------------
+
+export function countWords(text: string): number {
+  return (text.match(/\S+/gu) ?? []).length;
+}
+
+export function countChars(text: string, withSpaces: boolean): number {
+  return withSpaces ? text.length : (text.match(/\S/gu) ?? []).length;
 }
