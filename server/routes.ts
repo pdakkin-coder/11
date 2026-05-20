@@ -7,6 +7,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
+import { handleAiAnalyze } from "./aiAnalyze";
 
 const MAX_REMOTE_BYTES = 18 * 1024 * 1024;
 
@@ -14,10 +15,10 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  // prefix all routes with /api
-  // use storage to perform CRUD operations on the storage interface
-  // e.g. app.get("/api/items", async (_req, res) => { ... })
+  // ── AI-assisted citation analysis ──────────────────────────────────────────
+  app.post("/api/ai-analyze", handleAiAnalyze);
 
+  // ── Import from URL ────────────────────────────────────────────────────────
   app.post("/api/import-url", async (req, res) => {
     const rawUrl = typeof req.body?.url === "string" ? req.body.url.trim() : "";
     if (!rawUrl) {
@@ -90,6 +91,7 @@ export async function registerRoutes(
     });
   });
 
+  // ── Export to Drive ────────────────────────────────────────────────────────
   app.post("/api/export-drive", async (req, res) => {
     const text = typeof req.body?.text === "string" ? req.body.text : "";
     const docName = typeof req.body?.docName === "string" ? req.body.docName : "document.txt";
@@ -306,11 +308,7 @@ function callExternalTool(sourceId: string, toolName: string, argumentsValue: Re
     child.on("error", reject);
     child.on("close", (code) => {
       if (code !== 0) return reject(new Error(stderr || `external-tool exited with code ${code}`));
-      try {
-        resolve(JSON.parse(stdout));
-      } catch {
-        resolve(stdout);
-      }
+      try { resolve(JSON.parse(stdout)); } catch { resolve(stdout); }
     });
   });
 }
