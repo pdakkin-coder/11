@@ -34,6 +34,8 @@ export interface AiAnalyzeResponse {
   summary: string;
   /** Full document text with citations converted to the requested targetStyle, or null */
   convertedText: string | null;
+  /** Which Gemini model was actually used (informational) */
+  _model?: string;
   error?: string;
 }
 
@@ -41,6 +43,19 @@ export interface AiAnalyzeState {
   data:    AiAnalyzeResponse | null;
   loading: boolean;
   error:   string | null;
+}
+
+/** Humanise raw error strings coming from the server or browser */
+function humaniseError(raw: string): string {
+  if (raw.includes("fetch failed") || raw.includes("Failed to fetch") || raw.includes("NetworkError"))
+    return "Не удалось подключиться к серверу. Убедитесь, что приложение запущено (npm run dev).";
+  if (raw.includes("ENOTFOUND") || raw.includes("ECONNREFUSED"))
+    return "Нет соединения с сервером. Проверьте, что сервер запущен на порту 5000.";
+  if (raw.includes("Квота исчерпана") || raw.includes("429"))
+    return raw; // already friendly from server
+  if (raw.includes("AbortError") || raw.includes("отменён"))
+    return "AI-анализ отменён (превышено время ожидания 95 с).";
+  return raw;
 }
 
 export function useAiAnalyze() {
@@ -72,9 +87,10 @@ export function useAiAnalyze() {
       const payload = isJson ? await res.json() : await res.text();
 
       if (!res.ok) {
-        const msg = typeof payload === "string"
+        const rawMsg = typeof payload === "string"
           ? payload || `HTTP ${res.status}`
-          : (payload?.error as string) || `HTTP ${res.status}`;
+          : (payload as { error?: string })?.error || `HTTP ${res.status}`;
+        const msg = humaniseError(rawMsg);
         const errorResponse: AiAnalyzeResponse = {
           items: [], bibEntries: [], detectedStyle: "Unknown",
           confidence: 0, language: req.language ?? "mixed", summary: "",
@@ -89,17 +105,12 @@ export function useAiAnalyze() {
       return data;
     } catch (err) {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
-      if ((err as Error).name === "AbortError") {
-        const msg = "AI-анализ отменён (превышено время ожидания 95 с).";
-        const errorResponse: AiAnalyzeResponse = {
-          items: [], bibEntries: [], detectedStyle: "Unknown",
-          confidence: 0, language: req.language ?? "mixed", summary: "",
-          convertedText: null, error: msg,
-        };
-        setState({ data: errorResponse, loading: false, error: msg });
-        return errorResponse;
-      }
-      const msg = err instanceof Error ? err.message : String(err);
+
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = (err as Error).name === "AbortError"
+        ? "AI-анализ отменён (превышено время ожидания 95 с)."
+        : humaniseError(raw);
+
       const errorResponse: AiAnalyzeResponse = {
         items: [], bibEntries: [], detectedStyle: "Unknown",
         confidence: 0, language: req.language ?? "mixed", summary: "",
