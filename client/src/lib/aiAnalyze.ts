@@ -2,6 +2,7 @@
  * useAiAnalyze — React hook for POST /api/ai-analyze
  *
  * Sends document text to the AI endpoint and returns enriched citation data.
+ * Exposes activeModel so the UI can show which Gemini model responded.
  * If the endpoint is unavailable (501/502) the caller should fall back to
  * the heuristic-only path.
  */
@@ -9,7 +10,7 @@
 import { useState, useCallback, useRef } from "react";
 import type { FoundItem, CitationStyle } from "./analyze";
 
-const CLIENT_TIMEOUT_MS = 95_000;
+const CLIENT_TIMEOUT_MS = 100_000;
 
 export interface AiAnalyzeRequest {
   text: string;
@@ -20,8 +21,22 @@ export interface AiAnalyzeRequest {
 export interface AiBibEntry {
   raw: string;
   style: string;
-  converted?: string;
-  fields: Record<string, string>;
+  converted?: string | null;
+  fields: {
+    author?: string;
+    year?: string;
+    title?: string;
+    source?: string;
+    publisher?: string;
+    place?: string;
+    pages?: string;
+    doi?: string;
+    url?: string;
+    volume?: string;
+    issue?: string;
+    type?: string;
+    [key: string]: string | undefined;
+  };
   startLine: number;
 }
 
@@ -34,33 +49,48 @@ export interface AiAnalyzeResponse {
   summary: string;
   /** Full document text with citations converted to the requested targetStyle, or null */
   convertedText: string | null;
-  /** Which Gemini model was actually used (informational) */
+  /** Gemini model ID that produced the response (e.g. 'gemini-2.5-flash') */
   _model?: string;
+  /** Human-readable model label (e.g. 'Gemini 2.5 Flash') */
+  _label?: string;
   error?: string;
 }
 
 export interface AiAnalyzeState {
-  data:    AiAnalyzeResponse | null;
-  loading: boolean;
-  error:   string | null;
+  data:        AiAnalyzeResponse | null;
+  loading:     boolean;
+  error:       string | null;
+  activeModel: string | null;   // label of the model that last responded
 }
 
 /** Humanise raw error strings coming from the server or browser */
 function humaniseError(raw: string): string {
-  if (raw.includes("fetch failed") || raw.includes("Failed to fetch") || raw.includes("NetworkError"))
-    return "Не удалось подключиться к серверу. Убедитесь, что приложение запущено (npm run dev).";
+  if (
+    raw.includes("fetch failed") ||
+    raw.includes("Failed to fetch") ||
+    raw.includes("NetworkError")
+  ) return "Не удалось подключиться к серверу. Убедитесь, что приложение запущено (npm run dev).";
+
   if (raw.includes("ENOTFOUND") || raw.includes("ECONNREFUSED"))
     return "Нет соединения с сервером. Проверьте, что сервер запущен на порту 5000.";
-  if (raw.includes("Квота исчерпана") || raw.includes("429"))
-    return raw; // already friendly from server
+
+  if (raw.includes("Квота исчерпана") || raw.includes("полночь") || raw.includes("aistudio.google.com"))
+    return raw; // already friendly from router
+
+  if (raw.includes("429"))
+    return "Достигнут лимит запросов к Gemini. Подождите минуту и повторите.";
+
   if (raw.includes("AbortError") || raw.includes("отменён"))
-    return "AI-анализ отменён (превышено время ожидания 95 с).";
+    return "AI-анализ отменён (превышено время ожидания 100 с).";
+
   return raw;
 }
 
 export function useAiAnalyze() {
-  const [state, setState] = useState<AiAnalyzeState>({ data: null, loading: false, error: null });
-  const abortRef = useRef<AbortController | null>(null);
+  const [state, setState] = useState<AiAnalyzeState>({
+    data: null, loading: false, error: null, activeModel: null,
+  });
+  const abortRef   = useRef<AbortController | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const analyze = useCallback(async (req: AiAnalyzeRequest) => {
@@ -68,55 +98,58 @@ export function useAiAnalyze() {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
     const ctrl = new AbortController();
-    abortRef.current = ctrl;
+    abortRef.current  = ctrl;
     timeoutRef.current = setTimeout(() => ctrl.abort(), CLIENT_TIMEOUT_MS);
 
-    setState({ data: null, loading: true, error: null });
+    setState({ data: null, loading: true, error: null, activeModel: null });
 
     try {
       const res = await fetch("/api/ai-analyze", {
-        method: "POST",
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-        signal: ctrl.signal,
+        body:    JSON.stringify(req),
+        signal:  ctrl.signal,
       });
 
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
-      const isJson = (res.headers.get("content-type") || "").includes("application/json");
+      const isJson = (res.headers.get("content-type") ?? "").includes("application/json");
       const payload = isJson ? await res.json() : await res.text();
 
       if (!res.ok) {
-        const rawMsg = typeof payload === "string"
-          ? payload || `HTTP ${res.status}`
-          : (payload as { error?: string })?.error || `HTTP ${res.status}`;
+        const rawMsg =
+          typeof payload === "string"
+            ? payload || `HTTP ${res.status}`
+            : (payload as { error?: string })?.error || `HTTP ${res.status}`;
         const msg = humaniseError(rawMsg);
         const errorResponse: AiAnalyzeResponse = {
           items: [], bibEntries: [], detectedStyle: "Unknown",
-          confidence: 0, language: req.language ?? "mixed", summary: "",
-          convertedText: null, error: msg,
+          confidence: 0, language: req.language ?? "mixed",
+          summary: "", convertedText: null, error: msg,
         };
-        setState({ data: errorResponse, loading: false, error: msg });
+        setState({ data: errorResponse, loading: false, error: msg, activeModel: null });
         return errorResponse;
       }
 
       const data = payload as AiAnalyzeResponse;
-      setState({ data, loading: false, error: null });
+      const activeModel = data._label ?? data._model ?? null;
+      setState({ data, loading: false, error: null, activeModel });
       return data;
+
     } catch (err) {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
       const raw = err instanceof Error ? err.message : String(err);
       const msg = (err as Error).name === "AbortError"
-        ? "AI-анализ отменён (превышено время ожидания 95 с)."
+        ? "AI-анализ отменён (превышено время ожидания 100 с)."
         : humaniseError(raw);
 
       const errorResponse: AiAnalyzeResponse = {
         items: [], bibEntries: [], detectedStyle: "Unknown",
-        confidence: 0, language: req.language ?? "mixed", summary: "",
-        convertedText: null, error: msg,
+        confidence: 0, language: req.language ?? "mixed",
+        summary: "", convertedText: null, error: msg,
       };
-      setState({ data: errorResponse, loading: false, error: msg });
+      setState({ data: errorResponse, loading: false, error: msg, activeModel: null });
       return errorResponse;
     }
   }, []);
@@ -124,17 +157,20 @@ export function useAiAnalyze() {
   const reset = useCallback(() => {
     abortRef.current?.abort();
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    setState({ data: null, loading: false, error: null });
+    setState({ data: null, loading: false, error: null, activeModel: null });
   }, []);
 
   return { ...state, analyze, reset };
 }
 
-/** Merge heuristic FoundItems with AI FoundItems (AI takes priority at same offset). */
+/**
+ * Merge heuristic FoundItems with AI FoundItems.
+ * AI results take priority at the same text offset.
+ */
 export function mergeFoundItems(heuristic: FoundItem[], ai: FoundItem[]): FoundItem[] {
   const result = [...ai];
   for (const h of heuristic) {
-    const dup = ai.some(a => Math.abs(a.start - h.start) < 10 && a.type === h.type);
+    const dup = ai.some((a) => Math.abs(a.start - h.start) < 10 && a.type === h.type);
     if (!dup) result.push(h);
   }
   return result.sort((a, b) => a.start - b.start);
