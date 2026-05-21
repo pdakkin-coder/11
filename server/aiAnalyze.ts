@@ -13,6 +13,8 @@ import type { Request, Response } from "express";
 const MODEL = "gemini-2.5-flash";
 const API_VERSION = "v1beta";
 const MAX_TEXT_CHARS = 24_000;
+// FIX 3: retry on 503 with exponential backoff
+const RETRY_DELAYS_MS = [1_500, 4_000];
 
 const SYSTEM_PROMPT = `You are an expert academic citation analysis engine.
 Given a scholarly document, identify ALL inline citations, bibliography entries, and direct quotes.
@@ -60,21 +62,38 @@ async function callGemini(userMsg: string, apiKey: string): Promise<string> {
     },
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let lastError: Error | null = null;
 
-  if (!res.ok) {
-    const errText = (await res.text()).slice(0, 300);
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+    }
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (res.ok) {
+      const json = (await res.json()) as {
+        candidates?: { content?: { parts?: { text?: string }[] } }[];
+      };
+      return json.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+    }
+
+    const errText = (await res.text()).slice(0, 400);
+
+    // FIX 3: retry only on 503 (transient overload)
+    if (res.status === 503 && attempt < RETRY_DELAYS_MS.length) {
+      lastError = new Error(`Gemini ${res.status}: ${errText}`);
+      continue;
+    }
+
     throw new Error(`Gemini ${res.status}: ${errText}`);
   }
 
-  const json = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
-  return json.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+  throw lastError ?? new Error("Gemini: все попытки исчерпаны");
 }
 
 function detectLang(text: string): "ru" | "en" | "mixed" {

@@ -169,7 +169,7 @@ export default function Workbench() {
   const [draft, setDraft]               = useState<string>(SAMPLE_DOC);
 
   // Resizable panels
-  const sidebar  = useDragResize(224, 160, 320, "right");
+  const sidebar    = useDragResize(224, 160, 320, "right");
   const rightPanel = useDragResize(360, 260, 560, "left");
 
   const heuristicFound = useMemo(() => findCitations(text), [text]);
@@ -189,6 +189,7 @@ export default function Workbench() {
     readingMinutes:   Math.max(1, Math.round(countWords(text) / 180)),
   }), [text, structure.paragraphs]);
 
+  // FIX 1: Check for GEMINI_API_KEY (not OPENAI_API_KEY)
   async function handleAiAnalyze() {
     if (!text.trim()) return;
     const result = await runAiAnalysis({ text, language: structure.language });
@@ -200,7 +201,7 @@ export default function Workbench() {
       });
     } else if (result?.error) {
       const msg = result.error;
-      if (msg.includes("OPENAI_API_KEY") || msg.includes("501") || msg.includes("не задан")) {
+      if (msg.includes("GEMINI_API_KEY") || msg.includes("501") || msg.includes("не задан")) {
         setAiSetupOpen(true);
       }
       toast({ title: "AI недоступен", description: msg, variant: "destructive" });
@@ -307,6 +308,9 @@ export default function Workbench() {
 
   const currentText = preview?.text ?? text;
 
+  // FIX 2: show success status bar ONLY when there is no error
+  const aiStatusOk = !aiLoading && !!aiData && !aiError;
+
   return (
     <div className="flex flex-col h-screen bg-background text-foreground" data-testid="workbench">
       {/* ── Header ──────────────────────────────────────────────────────────── */}
@@ -348,7 +352,7 @@ export default function Workbench() {
             <Upload className="h-4 w-4 mr-1.5" />{driveLoading ? "Drive…" : "В Drive"}
           </Button>
           <Button variant="outline" size="sm" onClick={handleAiAnalyze} disabled={aiLoading || !text.trim()} data-testid="button-ai-analyze"
-            title="Анализ цитирования через AI (OpenAI GPT-4o). Требует OPENAI_API_KEY.">
+            title="Анализ цитирования через Gemini AI. Требует GEMINI_API_KEY.">
             <Sparkles className="h-4 w-4 mr-1.5" />{aiLoading ? "AI…" : "AI-анализ"}
           </Button>
           <Select onValueChange={(v) => loadDemo(v as DemoId)}>
@@ -361,15 +365,15 @@ export default function Workbench() {
         </div>
       </header>
 
-      {/* ── AI Status bar ─────────────────────────────────────────────────── */}
+      {/* ── AI Status bar (FIX 2: guard with aiStatusOk) ───────────────────── */}
       {(aiLoading || aiData || aiError) && (
         <div className="h-7 border-b px-4 flex items-center gap-2 text-[11px] bg-muted/40">
           <Sparkles className="h-3.5 w-3.5 text-primary" />
           {aiLoading && <span>AI‑анализ выполняется…</span>}
-          {!aiLoading && aiData && !aiError && (
+          {aiStatusOk && (
             <span>
-              AI‑анализ активен: {aiData.items.length} элементов, стиль{" "}
-              {aiData.detectedStyle} ({Math.round((aiData.confidence ?? 0) * 100)}%).
+              AI‑анализ активен: {aiData!.items.length} элементов, стиль{" "}
+              {aiData!.detectedStyle} ({Math.round((aiData!.confidence ?? 0) * 100)}%).
             </span>
           )}
           {!aiLoading && aiError && (
@@ -412,27 +416,27 @@ export default function Workbench() {
               Настройка AI-анализа
             </DialogTitle>
             <DialogDescription>
-              AI-анализ использует OpenAI GPT-4o для точного распознавания цитат и стилей.
+              AI-анализ использует Google Gemini для точного распознавания цитат и стилей.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 text-[13px]">
             <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/5 p-3 space-y-1.5">
-              <div className="font-semibold text-yellow-600 dark:text-yellow-400">Требуется OPENAI_API_KEY</div>
+              <div className="font-semibold text-yellow-600 dark:text-yellow-400">Требуется GEMINI_API_KEY</div>
               <div className="text-muted-foreground leading-snug">
-                Переменная окружения <code className="font-mono bg-muted px-1 rounded text-[12px]">OPENAI_API_KEY</code> не задана на сервере.
+                Переменная окружения <code className="font-mono bg-muted px-1 rounded text-[12px]">GEMINI_API_KEY</code> не задана на сервере.
               </div>
             </div>
             <div className="space-y-1.5">
               <div className="font-medium">Как активировать:</div>
               <ol className="list-decimal list-inside space-y-1 text-muted-foreground leading-snug">
-                <li>Получите ключ на <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" className="text-primary underline">platform.openai.com/api-keys</a></li>
+                <li>Получите ключ на <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-primary underline">aistudio.google.com/apikey</a></li>
                 <li>Создайте файл <code className="font-mono bg-muted px-1 rounded text-[12px]">.env</code> в корне проекта</li>
-                <li>Добавьте строку:<br /><code className="font-mono bg-muted px-1.5 py-1 rounded text-[12px] mt-1 block">OPENAI_API_KEY=sk-…ваш_ключ…</code></li>
+                <li>Добавьте строку:<br /><code className="font-mono bg-muted px-1.5 py-1 rounded text-[12px] mt-1 block">GEMINI_API_KEY=AIza…ваш_ключ…</code></li>
                 <li>Перезапустите сервер: <code className="font-mono bg-muted px-1 rounded text-[12px]">npm run dev</code></li>
               </ol>
             </div>
             <div className="rounded-md border p-3 bg-muted/20 text-[12px] text-muted-foreground">
-              <span className="font-medium">Без ключа</span> — работает эвристический анализ. AI добавляет точность распознавания стилей и полей библиографии.
+              <span className="font-medium">Без ключа</span> — работает эвристический анализ. Gemini добавляет точность распознавания стилей и полей библиографии.
             </div>
           </div>
           <DialogFooter>
@@ -963,8 +967,6 @@ function StructurePanel({ structure, onJump }: { structure: ReturnType<typeof an
   return (
     <div className="space-y-4">
       <PanelHeader title="Структура документа" hint="Разделы и аннотированные блоки." />
-
-      {/* Stats grid — 2 columns, no overflow */}
       <div className="grid grid-cols-2 gap-2">
         {stats.map(({ label, value }) => (
           <div key={label} className="rounded-md border bg-muted/20 px-3 py-2 text-center overflow-hidden">
@@ -973,8 +975,6 @@ function StructurePanel({ structure, onJump }: { structure: ReturnType<typeof an
           </div>
         ))}
       </div>
-
-      {/* Sections list */}
       {structure.sections.length > 0 && (
         <div>
           <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono mb-2">Разделы</div>
