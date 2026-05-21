@@ -5,14 +5,14 @@
  * Body: { text: string; targetStyle?: string; language?: string }
  *
  * Requires GEMINI_API_KEY in environment.
- * Model cascade: gemini-2.5-flash → gemini-2.5-flash-tts (on 429)
+ * Model cascade: gemini-2.5-flash → gemini-2.0-flash (on 429)
  * Falls back gracefully if AI is unavailable.
  */
 
 import type { Request, Response } from "express";
 
 const MODEL_PRIMARY  = "gemini-2.5-flash";
-const MODEL_FALLBACK = "gemini-2.5-flash-tts";
+const MODEL_FALLBACK = "gemini-2.0-flash";
 const API_VERSION    = "v1beta";
 const MAX_TEXT_CHARS  = 24_000;
 const RETRY_DELAYS_MS = [1_500, 4_000];
@@ -100,7 +100,7 @@ async function callGeminiModel(userMsg: string, apiKey: string, model: string): 
 
 /**
  * Primary: gemini-2.5-flash with 503-retry.
- * On 429 → immediate fallback to gemini-2.5-flash-tts (same retry policy).
+ * On 429 → immediate fallback to gemini-2.0-flash (same retry policy).
  * On 429 from fallback → throw with a clear quota message.
  */
 async function callGemini(userMsg: string, apiKey: string): Promise<{ raw: string; model: string }> {
