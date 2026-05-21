@@ -20,7 +20,7 @@ export const MODELS = [
 export type GeminiModel = typeof MODELS[number];
 
 const API_VERSION      = "v1beta";
-const FETCH_TIMEOUT_MS = 90_000;
+const FETCH_TIMEOUT_MS = 25_000; // 25s per model → 3×25s = 75s < Express timeout
 const RETRY_DELAYS_MS  = [1_500, 4_000] as const;
 
 async function fetchWithTimeout(

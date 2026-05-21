@@ -15,6 +15,10 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Allow long-running AI analysis requests (cascade can take up to ~75s)
+  httpServer.timeout = 120_000;        // 120s — server drops idle connections
+  httpServer.keepAliveTimeout = 125_000;
+
   // ── AI-assisted citation analysis ──────────────────────────────────────────
   app.post("/api/ai-analyze", handleAiAnalyze);
 
