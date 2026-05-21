@@ -2,32 +2,42 @@
  * geminiRouter.ts — Gemini model cascade
  *
  * Cascade order (as of 2026-05-21, free-tier AI Studio limits):
- *   1. gemini-2.5-flash   — 5 RPM, 20 RPD   (primary)
- *   2. gemini-3.5-flash   — 5 RPM, 20 RPD   (fallback-1)
+ *   1. gemini-2.5-flash     — 5 RPM,  20 RPD  (primary)
+ *   2. gemini-3.5-flash     — 5 RPM,  20 RPD  (fallback-1)
  *   3. gemini-3.1-flash-lite — 15 RPM, 500 RPD (fallback-2; 25× more daily quota)
  *
- * On 429 (rate-limit / daily quota):
- *   primary fails → try fallback-1 → try fallback-2 → throw with reset hint
- * On 503 (overload) or network error:
- *   retry within the same model (RETRY_DELAYS_MS) before advancing.
+ * On 429 (rate-limit / daily quota): advance to next model.
+ * On 503 (overload) or network error: retry within same model.
+ * All models exhausted: throw with UTC-midnight RPD reset hint.
  */
 
-const MODELS = [
-  "gemini-2.5-flash",        // primary
-  "gemini-3.5-flash",        // fallback-1
-  "gemini-3.1-flash-lite",   // fallback-2 — 500 RPD safety net
+export const MODELS = [
+  "gemini-2.5-flash",
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
 ] as const;
 
 export type GeminiModel = typeof MODELS[number];
 
-const API_VERSION     = "v1beta";
+const API_VERSION      = "v1beta";
 const FETCH_TIMEOUT_MS = 90_000;
 const RETRY_DELAYS_MS  = [1_500, 4_000] as const;
 
 /**
- * Call a single Gemini model with one attempt.
- * Throws an error enriched with `.status` on HTTP failure.
+ * fetch() с ручным AbortController-таймаутом.
+ * Работает на любой версии Node, где есть fetch.
  */
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Call one model, one attempt. Throws enriched error with .status on HTTP failure. */
 async function callGeminiModel(
   contents: object[],
   generationConfig: object,
@@ -37,12 +47,15 @@ async function callGeminiModel(
   const url =
     `https://generativelanguage.googleapis.com/${API_VERSION}/models/${model}:generateContent?key=${apiKey}`;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents, generationConfig }),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ contents, generationConfig }),
+    },
+    FETCH_TIMEOUT_MS,
+  );
 
   if (res.ok) {
     const json = (await res.json()) as {
@@ -56,14 +69,13 @@ async function callGeminiModel(
   }
 
   const errText = (await res.text()).slice(0, 600);
+  console.error(`[gemini-router] ${model} HTTP ${res.status}: ${errText}`);
   const err = new Error(`Gemini [${model}] ${res.status}: ${errText}`) as Error & { status: number };
   err.status = res.status;
   throw err;
 }
 
-/**
- * Try one model with 503-retries, then throw.
- */
+/** Try one model with 503-retries. */
 async function tryModel(
   contents: object[],
   generationConfig: object,
@@ -95,39 +107,32 @@ export interface GeminiResult {
 }
 
 /**
- * Main cascade entry point.
- *
- * Walks MODELS[] in order; advances to the next model only on 429.
- * If all models return 429, throws with a UTC-midnight reset hint.
+ * Main cascade: walk MODELS[], advance only on 429.
+ * All models exhausted → throw with reset hint.
  */
 export async function callGemini(
   contents: object[],
   generationConfig: object,
   apiKey: string,
 ): Promise<GeminiResult> {
-  let lastQuotaError: Error | null = null;
-
   for (const model of MODELS) {
     try {
       const raw = await tryModel(contents, generationConfig, apiKey, model);
+      console.info(`[gemini-router] success with ${model}`);
       return { raw, model };
     } catch (err) {
       const e = err as Error & { status?: number };
       if (e.status === 429) {
         console.warn(`[gemini-router] ${model} quota exceeded (429), trying next model`);
-        lastQuotaError = e;
         continue;
       }
       throw e;
     }
   }
 
-  // All models exhausted
   throw new Error(
-    `Квота исчерпана на всех доступных моделях Gemini ` +
-    `(${MODELS.join(" → ")}). ` +
-    `Суточный лимит RPD сбрасывается в полночь UTC. ` +
-    `Gemini 3.1 Flash Lite имеет 500 RPD и должен выдержать большинство нагрузок. ` +
-    `Если ошибка повторяется — подождите до следующего дня или проверьте план на https://ai.dev/rate-limit`
+    `Квота исчерпана на всех моделях (${MODELS.join(" → ")}). ` +
+    `RPD сбрасывается в полночь UTC. ` +
+    `Подождите до следующего дня или проверьте план: https://ai.dev/rate-limit`
   );
 }
