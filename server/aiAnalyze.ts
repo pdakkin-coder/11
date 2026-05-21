@@ -4,13 +4,13 @@
  * POST /api/ai-analyze
  * Body: { text: string; targetStyle?: string; language?: string }
  *
- * Requires OPENAI_API_KEY in environment.
+ * Requires GEMINI_API_KEY in environment.
  * Falls back to heuristic results if AI is unavailable.
  */
 
 import type { Request, Response } from "express";
 
-const MODEL = "gpt-4o";
+const MODEL = "gemini-1.5-flash";
 const MAX_TEXT_CHARS = 24_000;
 
 const SYSTEM_PROMPT = `You are an expert academic citation analysis engine.
@@ -45,17 +45,32 @@ Return ONLY valid JSON — no markdown fences, no prose:
   ]
 }`;
 
-interface OpenAIMessage { role: "system" | "user" | "assistant"; content: string; }
+async function callGemini(userMsg: string, apiKey: string): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
+  const body = {
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: "user", parts: [{ text: userMsg }] }],
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: "application/json",
+    },
+  };
 
-async function callOpenAI(messages: OpenAIMessage[], apiKey: string): Promise<string> {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: MODEL, messages, temperature: 0, response_format: { type: "json_object" } }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`OpenAI ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  const json = (await res.json()) as { choices: { message: { content: string } }[] };
-  return json.choices[0]?.message?.content ?? "{}";
+
+  if (!res.ok) {
+    const errText = (await res.text()).slice(0, 300);
+    throw new Error(`Gemini ${res.status}: ${errText}`);
+  }
+
+  const json = (await res.json()) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+  };
+  return json.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
 }
 
 function detectLang(text: string): "ru" | "en" | "mixed" {
@@ -68,9 +83,9 @@ function detectLang(text: string): "ru" | "en" | "mixed" {
 }
 
 export async function handleAiAnalyze(req: Request, res: Response): Promise<void> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    res.status(501).json({ error: "OPENAI_API_KEY не задан. Установите переменную окружения для AI-анализа." });
+    res.status(501).json({ error: "GEMINI_API_KEY не задан. Установите переменную окружения для AI-анализа." });
     return;
   }
 
@@ -81,13 +96,13 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
   const language   = typeof req.body?.language   === "string" ? req.body.language   : detectLang(rawText);
 
   const text = rawText.length > MAX_TEXT_CHARS
-    ? rawText.slice(0, MAX_TEXT_CHARS * 0.7) + "\n[...]\ n" + rawText.slice(-MAX_TEXT_CHARS * 0.3)
+    ? rawText.slice(0, MAX_TEXT_CHARS * 0.7) + "\n[...]\n" + rawText.slice(-MAX_TEXT_CHARS * 0.3)
     : rawText;
 
   const userMsg = [`Language hint: ${language}`, `Target style: ${targetStyle}`, "---BEGIN---", text, "---END---"].join("\n");
 
   try {
-    const raw = await callOpenAI([{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userMsg }], apiKey);
+    const raw = await callGemini(userMsg, apiKey);
     let parsed: Record<string, unknown> = {};
     try { parsed = JSON.parse(raw); } catch { /* use empty */ }
 
