@@ -5,14 +5,14 @@
  * Body: { text: string; targetStyle?: string; language?: string }
  *
  * Requires GEMINI_API_KEY in environment.
- * Model cascade: gemini-2.5-flash → gemini-2.0-flash-lite (on 429)
+ * Model cascade: gemini-2.5-flash → gemini-2.5-flash-tts (on 429)
  * Falls back gracefully if AI is unavailable.
  */
 
 import type { Request, Response } from "express";
 
 const MODEL_PRIMARY  = "gemini-2.5-flash";
-const MODEL_FALLBACK = "gemini-2.0-flash-lite";
+const MODEL_FALLBACK = "gemini-2.5-flash-tts";
 const API_VERSION    = "v1beta";
 const MAX_TEXT_CHARS  = 24_000;
 const RETRY_DELAYS_MS = [1_500, 4_000];
@@ -57,7 +57,7 @@ Return ONLY valid JSON — no markdown fences, no prose:
 
 /**
  * Call one specific Gemini model. Returns raw text or throws.
- * Does NOT retry — retry/fallback logic lives in callGeminiWithFallback.
+ * Does NOT retry — retry/fallback logic lives in callGemini.
  */
 async function callGeminiModel(userMsg: string, apiKey: string, model: string): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/${API_VERSION}/models/${model}:generateContent?key=${apiKey}`;
@@ -100,7 +100,7 @@ async function callGeminiModel(userMsg: string, apiKey: string, model: string): 
 
 /**
  * Primary: gemini-2.5-flash with 503-retry.
- * On 429 → immediate fallback to gemini-2.0-flash-lite (same retry policy).
+ * On 429 → immediate fallback to gemini-2.5-flash-tts (same retry policy).
  * On 429 from fallback → throw with a clear quota message.
  */
 async function callGemini(userMsg: string, apiKey: string): Promise<{ raw: string; model: string }> {
@@ -114,7 +114,7 @@ async function callGemini(userMsg: string, apiKey: string): Promise<{ raw: strin
         return await callGeminiModel(userMsg, apiKey, model);
       } catch (err) {
         const e = err as Error & { status?: number };
-        // Retry only on 503 (overloaded) or network errors
+        // Retry only on 503 (overloaded) or transient network errors
         if ((e.status === 503 || !e.status) && attempt < RETRY_DELAYS_MS.length) {
           lastError = e;
           continue;
