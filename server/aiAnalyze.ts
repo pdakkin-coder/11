@@ -10,7 +10,7 @@
 
 import type { Request, Response } from "express";
 
-const MODEL = "gemini-2.0-flash";
+const MODEL = "gemini-2.5-flash-preview-05-20";
 const API_VERSION = "v1beta"; // v1beta required for system_instruction support
 const MAX_TEXT_CHARS = 24_000;
 
