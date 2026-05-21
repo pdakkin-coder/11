@@ -80,7 +80,7 @@ function legendDotClass(type: FoundItem["type"]): string {
   }
 }
 
-// FIX: ключ "канцелярит" синхронизирован с типом EditorIssue в analyze.ts
+// ключ "канцелярит" синхронизирован с типом EditorIssue в analyze.ts
 const ISSUE_LABELS: Record<EditorIssue["type"], string> = {
   "длинное-предложение":      "Длинное предложение",
   "пассив":                   "Пассивная конструкция",
@@ -158,7 +158,7 @@ export default function Workbench() {
   const [aiFound, setAiFound]           = useState<FoundItem[] | null>(null);
   const { analyze: runAiAnalysis, loading: aiLoading, data: aiData, error: aiError } = useAiAnalyze();
   const [aiSetupOpen, setAiSetupOpen]   = useState(false);
-  // Track which targetStyle was used for the last AI analysis (for ConvertPanel)
+  // Последний целевой стиль, переданный в AI-анализ (для ConvertPanel)
   const [aiTargetStyle, setAiTargetStyle] = useState<CitationStyle | null>(null);
   const [customRules, setCustomRules]   = useState<CustomCitationRules>({
     name: "Авторский стандарт",
@@ -194,7 +194,7 @@ export default function Workbench() {
 
   /**
    * Run AI analysis with an optional targetStyle for conversion.
-   * Called both from the header button (no target) and from ConvertPanel (with target).
+   * If the AI returns convertedText, apply it directly to the document.
    */
   async function handleAiAnalyze(targetStyle?: CitationStyle) {
     if (!text.trim()) return;
@@ -204,22 +204,47 @@ export default function Workbench() {
       ...(targetStyle ? { targetStyle } : {}),
     };
     const result = await runAiAnalysis(req);
-    if (result && result.items?.length) {
+    if (!result) return;
+
+    // Update found citations from AI
+    if (result.items?.length) {
       setAiFound(result.items as FoundItem[]);
-      if (targetStyle) setAiTargetStyle(targetStyle);
-      toast({
-        title: "AI-анализ завершён",
-        description: result.summary || `Найдено ${result.items.length} элементов (уверенность ${Math.round((result.confidence ?? 0) * 100)}%).`,
-      });
-    } else if (result?.error) {
+    }
+
+    if (result.error) {
       const msg = result.error;
       if (msg.includes("GEMINI_API_KEY") || msg.includes("501") || msg.includes("не задан")) {
         setAiSetupOpen(true);
       }
       toast({ title: "AI недоступен", description: msg, variant: "destructive" });
+      return;
+    }
+
+    // If AI returned a converted document — apply it immediately
+    if (targetStyle && result.convertedText && result.convertedText.trim()) {
+      setText(result.convertedText);
+      setDraft(result.convertedText);
+      setPreview(null);
+      setAiTargetStyle(targetStyle);
+      toast({
+        title: "AI-конвертация применена",
+        description: `Документ переформатирован в ${targetStyle} (Gemini). Проверьте вручную.`,
+      });
     } else {
-      if (targetStyle) setAiTargetStyle(targetStyle);
-      toast({ title: "AI-анализ завершён", description: "Дополнительные цитаты не обнаружены." });
+      if (targetStyle) {
+        setAiTargetStyle(targetStyle);
+        toast({
+          title: "AI-анализ завершён",
+          description: "Gemini не вернул преобразованный текст. Используйте эвристическую конвертацию.",
+        });
+      } else {
+        toast({
+          title: "AI-анализ завершён",
+          description: result.summary ||
+            `Найдено ${result.items?.length ?? 0} элементов` +
+            (result.confidence ? ` (уверенность ${Math.round(result.confidence * 100)}%)` : "") + ".",
+        });
+      }
     }
   }
 
@@ -386,7 +411,7 @@ export default function Workbench() {
               AI‑анализ активен: {aiData!.items.length} элементов, стиль{" "}
               {aiData!.detectedStyle} ({Math.round((aiData!.confidence ?? 0) * 100)}%).
               {aiData!.convertedText && aiTargetStyle && (
-                <> · конвертация в <strong>{aiTargetStyle}</strong> готова.</>
+                <> · конвертация в <strong>{aiTargetStyle}</strong> применена.</>
               )}
             </span>
           )}
@@ -895,12 +920,11 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
 }) {
   const [target, setTarget] = useState<CitationStyle>("APA");
 
-  // Use AI convertedText if it was produced for the currently selected target style
+  // AI-конвертация доступна, если результат получен именно для текущего целевого стиля
   const aiConvertedAvailable =
     !!aiData?.convertedText && !aiLoading && aiTargetStyle === target;
 
   const result = useMemo(() => {
-    // If AI already produced a conversion for this exact target — use it
     if (aiConvertedAvailable && aiData!.convertedText) {
       return {
         text: aiData!.convertedText,
@@ -909,7 +933,6 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
         source: "ai" as const,
       };
     }
-    // Fallback: heuristic converter
     try {
       const r = convertCitations(text, target, customRules);
       return { ...r, source: "heuristic" as const };
@@ -925,7 +948,10 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
 
   return (
     <div className="space-y-4">
-      <PanelHeader title="Конвертация стиля" hint="Выберите целевой стиль и нажмите кнопку конвертации." />
+      <PanelHeader
+        title="Конвертация стиля"
+        hint="Выберите целевой стиль. AI-конвертация применяет изменения напрямую; эвристика — через предпросмотр."
+      />
       <div className="space-y-1.5">
         <Label className="text-[12px]">Целевой стиль</Label>
         <Select value={target} onValueChange={(v) => setTarget(v as CitationStyle)}>
@@ -990,7 +1016,7 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
           <div className="text-[11px] text-muted-foreground">
             {target === detected.style
               ? `ℹ Документ уже в формате ${target}.`
-              : "ℹ Эвристика не нашла подходящих замен. Попробуйте AI-конвертацию."}
+              : "ℹ Эвристика не нашла замен. Попробуйте AI-конвертацию."}
           </div>
         )}
         {result.warnings.length > 0 && (
@@ -1012,7 +1038,7 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
         </div>
       ) : (
         <div className="space-y-2">
-          {/* One-click AI convert */}
+          {/* One-click AI convert — applies text directly, no preview step */}
           <Button
             className="w-full"
             size="sm"
@@ -1020,7 +1046,7 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
             disabled={aiLoading}
             onClick={() => onAiConvert(target)}
             data-testid="button-ai-convert"
-            title="Отправить документ в Gemini для точной конвертации стиля"
+            title="Отправить документ в Gemini для точной конвертации стиля и немедленного применения"
           >
             {aiLoading ? (
               <><RefreshCw className="h-3.5 w-3.5 mr-1.5 animate-spin" />AI конвертирует…</>
@@ -1028,14 +1054,14 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
               <><Zap className="h-3.5 w-3.5 mr-1.5" />Конвертировать через AI → {target}</>
             )}
           </Button>
-          {/* Heuristic fallback */}
+          {/* Heuristic fallback — keeps preview workflow */}
           <Button
             className="w-full"
             size="sm"
             variant="outline"
             onClick={() => onRun(target, result.text)}
             data-testid="button-run-convert"
-            title="Локальная эвристическая конвертация (без AI)"
+            title="Локальная эвристическая конвертация (без AI, с предпросмотром)"
           >
             <RefreshCw className="h-3.5 w-3.5 mr-1.5" />Предпросмотр (эвристика)
           </Button>
@@ -1047,9 +1073,9 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
   );
 }
 
-// FIX: StructurePanel — исправлено переполнение блоков статистики
+// ── StructurePanel — карточки не выходят за экран ─────────────────────────────
 function StructurePanel({ structure, onJump }: { structure: ReturnType<typeof analyzeStructure>; onJump: (line: number) => void }) {
-  const stats = [
+  const items = [
     { label: "Параграфов",    value: structure.paragraphs },
     { label: "Разделов",      value: structure.sections.length },
     { label: "Сносок",        value: structure.footnoteCount },
@@ -1059,12 +1085,23 @@ function StructurePanel({ structure, onJump }: { structure: ReturnType<typeof an
   return (
     <div className="space-y-4">
       <PanelHeader title="Структура документа" hint="Разделы и аннотированные блоки." />
-      {/* FIX: убраны фиксированные высоты, overflow:hidden и text-center которые вызывали выход за экран */}
+      {/*
+        grid-cols-2: две колонки по умолчанию.
+        min-w-0 + overflow-hidden на каждой карточке предотвращают выход за пределы панели.
+        break-words + hyphens-auto позволяют длинным подписям переноситься, а не вылезать.
+      */}
       <div className="grid grid-cols-2 gap-2">
-        {stats.map(({ label, value }) => (
-          <div key={label} className="rounded-md border bg-muted/20 px-3 py-2.5 flex flex-col items-center min-w-0">
-            <div className="text-[20px] font-semibold tabular-nums leading-none mb-1 truncate w-full text-center">{value}</div>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide leading-tight text-center w-full break-words hyphens-auto">{label}</div>
+        {items.map(({ label, value }) => (
+          <div
+            key={label}
+            className="rounded-md border bg-muted/20 px-2 py-2.5 flex flex-col items-center min-w-0 overflow-hidden"
+          >
+            <div className="text-[20px] font-semibold tabular-nums leading-none mb-1">
+              {value}
+            </div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide leading-tight text-center w-full break-words hyphens-auto">
+              {label}
+            </div>
           </div>
         ))}
       </div>
