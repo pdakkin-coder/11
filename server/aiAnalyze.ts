@@ -10,7 +10,8 @@
 
 import type { Request, Response } from "express";
 
-const MODEL = "gemini-1.5-flash";
+const MODEL = "gemini-2.0-flash";
+const API_VERSION = "v1beta"; // v1beta required for system_instruction support
 const MAX_TEXT_CHARS = 24_000;
 
 const SYSTEM_PROMPT = `You are an expert academic citation analysis engine.
@@ -46,7 +47,7 @@ Return ONLY valid JSON — no markdown fences, no prose:
 }`;
 
 async function callGemini(userMsg: string, apiKey: string): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/${API_VERSION}/models/${MODEL}:generateContent?key=${apiKey}`;
   const body = {
     system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
     contents: [{ role: "user", parts: [{ text: userMsg }] }],
