@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FileText, Search, BookOpen, Wand2, PenSquare, Layers, Sun, Moon,
   Upload, Download, Link2, RefreshCw, CheckCircle2, Hash, Type,
@@ -90,6 +90,51 @@ const ISSUE_LABELS: Record<EditorIssue["type"], string> = {
   "канцеляризм":             "Канцеляризм",
 };
 
+// ── Drag-to-resize hook ───────────────────────────────────────────────────────
+function useDragResize(
+  initialWidth: number,
+  minWidth: number,
+  maxWidth: number,
+  direction: "right" | "left" = "right"
+) {
+  const [width, setWidth] = useState(initialWidth);
+  const dragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(0);
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    startX.current = e.clientX;
+    startW.current = width;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, [width]);
+
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      if (!dragging.current) return;
+      const delta = direction === "right"
+        ? e.clientX - startX.current
+        : startX.current - e.clientX;
+      setWidth(Math.min(maxWidth, Math.max(minWidth, startW.current + delta)));
+    }
+    function onUp() {
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [direction, minWidth, maxWidth]);
+
+  return { width, onMouseDown };
+}
+
 export default function Workbench() {
   const { theme, toggle } = useTheme();
   const { toast } = useToast();
@@ -122,6 +167,10 @@ export default function Workbench() {
   const [hoveredId, setHoveredId]       = useState<string | null>(null);
   const [editMode, setEditMode]         = useState(false);
   const [draft, setDraft]               = useState<string>(SAMPLE_DOC);
+
+  // Resizable panels
+  const sidebar  = useDragResize(224, 160, 320, "right");
+  const rightPanel = useDragResize(360, 260, 560, "left");
 
   const heuristicFound = useMemo(() => findCitations(text), [text]);
   const found = useMemo(
@@ -392,10 +441,14 @@ export default function Workbench() {
         </DialogContent>
       </Dialog>
 
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* ── Sidebar ───────────────────────────────────────────────────────── */}
-        <aside className="w-56 shrink-0 border-r bg-sidebar/60 flex flex-col" data-testid="sidebar">
-          <nav className="p-2 space-y-0.5">
+        <aside
+          className="shrink-0 border-r bg-sidebar/60 flex flex-col min-h-0 overflow-hidden"
+          style={{ width: sidebar.width }}
+          data-testid="sidebar"
+        >
+          <nav className="p-2 space-y-0.5 shrink-0">
             {(Object.keys(PANEL_LABELS) as Panel[]).map((k) => {
               const Icon = PANEL_LABELS[k].icon;
               const active = panel === k;
@@ -404,37 +457,44 @@ export default function Workbench() {
                   className={`w-full flex items-center gap-2.5 rounded-md px-3 py-2 text-sm hover-elevate active-elevate-2 text-left ${
                     active ? "bg-primary/10 text-primary font-medium" : "text-foreground/80"
                   }`}>
-                  <Icon className="h-4 w-4" />
-                  {PANEL_LABELS[k].label}
-                  {k === "citations" && <span className="ml-auto text-[10px] font-mono text-muted-foreground">{found.length}</span>}
-                  {k === "editor" && issues.length > 0 && <span className="ml-auto text-[10px] font-mono text-muted-foreground">{issues.length}</span>}
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="truncate">{PANEL_LABELS[k].label}</span>
+                  {k === "citations" && <span className="ml-auto text-[10px] font-mono text-muted-foreground shrink-0">{found.length}</span>}
+                  {k === "editor" && issues.length > 0 && <span className="ml-auto text-[10px] font-mono text-muted-foreground shrink-0">{issues.length}</span>}
                 </button>
               );
             })}
           </nav>
-          <div className="mt-4 px-3 pb-2">
+          <div className="mt-4 px-3 pb-2 shrink-0">
             <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono mb-1.5">Легенда</div>
             <div className="space-y-1">
               {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([t, l]) => (
                 <div key={t} className="flex items-center gap-1.5 text-[11px] text-foreground/75">
-                  <span className={`legend-dot ${legendDotClass(t)}`} />
-                  {l}
+                  <span className={`legend-dot ${legendDotClass(t)} shrink-0`} />
+                  <span className="truncate">{l}</span>
                 </div>
               ))}
               <div className="flex items-center gap-1.5 text-[11px] text-foreground/75">
-                <span className="legend-dot legend-dot-issue" />
-                Замечание редактуры
+                <span className="legend-dot legend-dot-issue shrink-0" />
+                <span className="truncate">Замечание редактуры</span>
               </div>
             </div>
           </div>
-          <div className="mt-auto p-3 text-[11px] text-muted-foreground leading-snug border-t">
+          <div className="mt-auto p-3 text-[11px] text-muted-foreground leading-snug border-t shrink-0">
             Прототип. Преобразования эвристические — проверяйте вручную.
           </div>
         </aside>
 
+        {/* ── Sidebar resize handle ─────────────────────────────────────────── */}
+        <div
+          onMouseDown={sidebar.onMouseDown}
+          className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
+          title="Потяните, чтобы изменить ширину"
+        />
+
         {/* ── Workspace ─────────────────────────────────────────────────────── */}
-        <main className="flex flex-1 min-w-0 min-h-0 divide-x">
-          <section className="flex flex-col flex-1 min-w-0 min-h-0">
+        <main className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
+          <section className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
             <div className="h-10 border-b flex items-center px-4 gap-3 shrink-0 bg-muted/30">
               <AlignLeft className="h-4 w-4 text-muted-foreground" />
               <span className="text-[13px] text-muted-foreground font-medium">
@@ -472,7 +532,7 @@ export default function Workbench() {
                 </div>
               )}
             </div>
-            <ScrollArea className="flex-1">
+            <ScrollArea className="flex-1 min-h-0">
               {editMode ? (
                 <RichEditor draft={draft} onChange={setDraft} />
               ) : (
@@ -488,12 +548,23 @@ export default function Workbench() {
             </ScrollArea>
           </section>
 
-          <section className="w-[360px] shrink-0 flex flex-col min-h-0" data-testid="right-panel">
+          {/* ── Right panel resize handle ─────────────────────────────────── */}
+          <div
+            onMouseDown={rightPanel.onMouseDown}
+            className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors border-l"
+            title="Потяните, чтобы изменить ширину"
+          />
+
+          <section
+            className="shrink-0 flex flex-col min-h-0 overflow-hidden"
+            style={{ width: rightPanel.width }}
+            data-testid="right-panel"
+          >
             <div className="h-10 border-b flex items-center px-4 shrink-0 bg-muted/30">
-              <Type className="h-4 w-4 text-muted-foreground mr-2" />
-              <span className="text-[13px] text-muted-foreground font-medium uppercase tracking-wide">{PANEL_LABELS[panel].label}</span>
+              <Type className="h-4 w-4 text-muted-foreground mr-2 shrink-0" />
+              <span className="text-[13px] text-muted-foreground font-medium uppercase tracking-wide truncate">{PANEL_LABELS[panel].label}</span>
             </div>
-            <ScrollArea className="flex-1">
+            <ScrollArea className="flex-1 min-h-0">
               <div className="p-4">
                 {panel === "citations" && <CitationsPanel items={filteredFound} total={found.length}
                   search={search} setSearch={setSearch}
@@ -711,13 +782,13 @@ function CitationsPanel({ items, total, search, setSearch, typeFilter, setTypeFi
     <div className="space-y-3">
       <PanelHeader title="Цитаты и сноски" hint={`Найдено: ${total}. Нажмите на элемент, чтобы выделить его в тексте.`} />
       <div className="flex gap-2">
-        <div className="relative flex-1">
+        <div className="relative flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
           <Input value={search} onChange={(e) => setSearch(e.target.value)}
             placeholder="Поиск…" className="pl-8 h-8 text-[13px]" data-testid="input-search-citations" />
         </div>
         <Select value={typeFilter} onValueChange={setTypeFilter}>
-          <SelectTrigger className="h-8 w-[130px] text-[12px]" data-testid="select-filter-type"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="h-8 w-[120px] shrink-0 text-[12px]" data-testid="select-filter-type"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">Все типы</SelectItem>
             {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([k, v]) => (
@@ -735,8 +806,8 @@ function CitationsPanel({ items, total, search, setSearch, typeFilter, setTypeFi
               className="w-full text-left rounded-md border px-3 py-2 text-[12.5px] hover:bg-accent/50 transition-colors" data-testid="citation-item">
               <div className="flex items-center gap-2 mb-1">
                 <span className={`legend-dot ${legendDotClass(item.type)} shrink-0`} />
-                <span className="font-medium text-[11px] uppercase tracking-wide text-muted-foreground">{TYPE_LABELS[item.type]}</span>
-                <span className="ml-auto text-[10px] text-muted-foreground font-mono">стр. {item.line}</span>
+                <span className="font-medium text-[11px] uppercase tracking-wide text-muted-foreground truncate">{TYPE_LABELS[item.type]}</span>
+                <span className="ml-auto text-[10px] text-muted-foreground font-mono shrink-0">стр. {item.line}</span>
               </div>
               <div className="text-foreground/80 leading-snug line-clamp-2">{item.text}</div>
               {item.note && <div className="text-muted-foreground text-[11px] mt-0.5">{item.note}</div>}
@@ -781,7 +852,7 @@ function Score({ label, value }: { label: string; value: number }) {
       <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
         <div className="h-full bg-primary/60 rounded-full transition-all" style={{ width: `${Math.min(100, value * 100)}%` }} />
       </div>
-      <span className="text-[11px] text-muted-foreground w-8 text-right">{Math.round(value * 100)}%</span>
+      <span className="text-[11px] text-muted-foreground w-8 text-right shrink-0">{Math.round(value * 100)}%</span>
     </div>
   );
 }
@@ -882,32 +953,43 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
 }
 
 function StructurePanel({ structure, onJump }: { structure: ReturnType<typeof analyzeStructure>; onJump: (line: number) => void }) {
+  const stats = [
+    { label: "Параграфов",     value: structure.paragraphs },
+    { label: "Разделов",       value: structure.sections.length },
+    { label: "Сносок",         value: structure.footnoteCount },
+    { label: "Библ. записей",  value: structure.bibCount },
+  ];
+
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <PanelHeader title="Структура документа" hint="Разделы и аннотированные блоки." />
+
+      {/* Stats grid — 2 columns, no overflow */}
       <div className="grid grid-cols-2 gap-2">
-        {[
-          { label: "Параграфов", value: structure.paragraphs },
-          { label: "Разделов", value: structure.sections.length },
-          { label: "Сносок", value: structure.footnoteCount },
-          { label: "Библ. записей", value: structure.bibCount },
-        ].map(({ label, value }) => (
-          <div key={label} className="rounded-md border px-3 py-2 bg-muted/20 text-center">
-            <div className="text-[18px] font-semibold tabular-nums">{value}</div>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide mt-0.5">{label}</div>
+        {stats.map(({ label, value }) => (
+          <div key={label} className="rounded-md border bg-muted/20 px-3 py-2 text-center overflow-hidden">
+            <div className="text-[22px] font-semibold tabular-nums leading-none mb-1">{value}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide leading-tight truncate">{label}</div>
           </div>
         ))}
       </div>
+
+      {/* Sections list */}
       {structure.sections.length > 0 && (
-        <div className="space-y-1">
-          <div className="text-[11px] text-muted-foreground uppercase tracking-widest mb-1">Разделы</div>
-          {structure.sections.map((s, i) => (
-            <button key={i} onClick={() => onJump(s.line)}
-              className="w-full text-left text-[12.5px] px-2 py-1.5 rounded hover:bg-accent/50 flex items-center gap-2">
-              <span className="text-muted-foreground font-mono text-[10px] w-6 shrink-0">{s.line}</span>
-              <span className="truncate">{s.text}</span>
-            </button>
-          ))}
+        <div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono mb-2">Разделы</div>
+          <div className="space-y-0.5">
+            {structure.sections.map((s, i) => (
+              <button
+                key={i}
+                onClick={() => onJump(s.line)}
+                className="w-full text-left text-[12px] px-2 py-1.5 rounded hover:bg-accent/50 transition-colors flex items-baseline gap-2 min-w-0"
+              >
+                <span className="text-muted-foreground font-mono text-[10px] w-5 shrink-0">{s.line}</span>
+                <span className="truncate flex-1">{s.text}</span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -948,8 +1030,8 @@ function EditorPanel({ issues, onSelect }: { issues: EditorIssue[]; onSelect: (i
               className="w-full text-left rounded-md border px-3 py-2 text-[12.5px] hover:bg-accent/50 transition-colors" data-testid="issue-item">
               <div className="flex items-center gap-2 mb-0.5">
                 <AlertTriangle className="h-3 w-3 text-warning shrink-0" />
-                <span className="font-medium text-[11px] uppercase tracking-wide text-muted-foreground">{ISSUE_LABELS[issue.type]}</span>
-                <span className="ml-auto text-[10px] text-muted-foreground font-mono">стр. {issue.line}</span>
+                <span className="font-medium text-[11px] uppercase tracking-wide text-muted-foreground truncate">{ISSUE_LABELS[issue.type]}</span>
+                <span className="ml-auto text-[10px] text-muted-foreground font-mono shrink-0">стр. {issue.line}</span>
               </div>
               <div className="text-foreground/80 leading-snug line-clamp-2">{issue.text}</div>
               {issue.suggestion && <div className="text-primary/70 text-[11px] mt-0.5">→ {issue.suggestion}</div>}
@@ -975,9 +1057,9 @@ function StatsPanel({ stats, found, issues, detected }: {
         <Metric label="Параграфов"          value={stats.paragraphs} />
         <Metric label="Строк"               value={stats.lines} />
         <Metric label="Время чтения"        value={`~${stats.readingMinutes} мин.`} />
-        <Metric label="Цитат и сносок"        value={found.length} />
-        <Metric label="Замечаний редактуры"  value={issues.length} />
-        <Metric label="Определённый стиль"   value={detected.style} />
+        <Metric label="Цитат и сносок"      value={found.length} />
+        <Metric label="Замечаний редактуры" value={issues.length} />
+        <Metric label="Определённый стиль"  value={detected.style} />
       </div>
     </div>
   );
