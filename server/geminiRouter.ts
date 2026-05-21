@@ -2,12 +2,12 @@
  * geminiRouter.ts — Gemini model cascade
  *
  * Cascade order (as of 2026-05-21, free-tier AI Studio limits):
- *   1. gemini-2.5-flash     — 5 RPM,  20 RPD  (primary)
- *   2. gemini-3.5-flash     — 5 RPM,  20 RPD  (fallback-1)
- *   3. gemini-3.1-flash-lite — 15 RPM, 500 RPD (fallback-2; 25× more daily quota)
+ *   1. gemini-2.5-flash      —  5 RPM,  20 RPD  (primary)
+ *   2. gemini-3.5-flash      —  5 RPM,  20 RPD  (fallback-1)
+ *   3. gemini-3.1-flash-lite — 15 RPM, 500 RPD  (fallback-2)
  *
- * On 429 (rate-limit / daily quota): advance to next model.
- * On 503 (overload) or network error: retry within same model.
+ * On 429: advance to next model in cascade.
+ * On 503 or transient network error (status === undefined): retry within same model.
  * All models exhausted: throw with UTC-midnight RPD reset hint.
  */
 
@@ -23,11 +23,11 @@ const API_VERSION      = "v1beta";
 const FETCH_TIMEOUT_MS = 90_000;
 const RETRY_DELAYS_MS  = [1_500, 4_000] as const;
 
-/**
- * fetch() с ручным AbortController-таймаутом.
- * Работает на любой версии Node, где есть fetch.
- */
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -37,7 +37,6 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
-/** Call one model, one attempt. Throws enriched error with .status on HTTP failure. */
 async function callGeminiModel(
   contents: object[],
   generationConfig: object,
@@ -75,7 +74,11 @@ async function callGeminiModel(
   throw err;
 }
 
-/** Try one model with 503-retries. */
+/**
+ * Try one model with retries.
+ * Retries ONLY on: 503 (overload) or status === undefined (transient network blip).
+ * Any other HTTP error (400, 404, 429, 500...) is thrown immediately.
+ */
 async function tryModel(
   contents: object[],
   generationConfig: object,
@@ -91,7 +94,9 @@ async function tryModel(
       return await callGeminiModel(contents, generationConfig, apiKey, model);
     } catch (err) {
       const e = err as Error & { status?: number };
-      if ((e.status === 503 || !e.status) && attempt < RETRY_DELAYS_MS.length) {
+      // Retry only on 503 or genuinely transient network errors (no HTTP status at all)
+      const isTransient = e.status === 503 || e.status === undefined;
+      if (isTransient && attempt < RETRY_DELAYS_MS.length) {
         lastError = e;
         continue;
       }
@@ -108,7 +113,8 @@ export interface GeminiResult {
 
 /**
  * Main cascade: walk MODELS[], advance only on 429.
- * All models exhausted → throw with reset hint.
+ * Non-429 HTTP errors (400, 404, 500...) are thrown immediately.
+ * Transient network errors also thrown immediately (not retried at cascade level).
  */
 export async function callGemini(
   contents: object[],
