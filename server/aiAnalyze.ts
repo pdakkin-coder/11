@@ -11,7 +11,7 @@
 import type { Request, Response } from "express";
 
 const MODEL = "gemini-2.5-flash-preview-05-20";
-const API_VERSION = "v1beta"; // v1beta required for system_instruction support
+const API_VERSION = "v1beta";
 const MAX_TEXT_CHARS = 24_000;
 
 const SYSTEM_PROMPT = `You are an expert academic citation analysis engine.
@@ -49,8 +49,11 @@ Return ONLY valid JSON — no markdown fences, no prose:
 async function callGemini(userMsg: string, apiKey: string): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/${API_VERSION}/models/${MODEL}:generateContent?key=${apiKey}`;
   const body = {
-    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents: [{ role: "user", parts: [{ text: userMsg }] }],
+    contents: [
+      { role: "user",  parts: [{ text: SYSTEM_PROMPT }] },
+      { role: "model", parts: [{ text: "Understood. I will analyze the document and return only valid JSON." }] },
+      { role: "user",  parts: [{ text: userMsg }] },
+    ],
     generationConfig: {
       temperature: 0,
       responseMimeType: "application/json",
