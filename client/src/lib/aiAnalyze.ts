@@ -11,6 +11,10 @@
 import { useState, useCallback, useRef } from "react";
 import type { FoundItem, CitationStyle } from "./analyze";
 
+// Client timeout is slightly longer than server (90s) so the server
+// error message reaches the client before the browser aborts the request.
+const CLIENT_TIMEOUT_MS = 95_000;
+
 export interface AiAnalyzeRequest {
   text: string;
   targetStyle?: CitationStyle;
@@ -44,11 +48,19 @@ export interface AiAnalyzeState {
 export function useAiAnalyze() {
   const [state, setState] = useState<AiAnalyzeState>({ data: null, loading: false, error: null });
   const abortRef = useRef<AbortController | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const analyze = useCallback(async (req: AiAnalyzeRequest) => {
+    // Cancel any in-flight request
     abortRef.current?.abort();
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+
+    // Client-side timeout: abort after CLIENT_TIMEOUT_MS
+    timeoutRef.current = setTimeout(() => ctrl.abort(), CLIENT_TIMEOUT_MS);
+
     setState({ data: null, loading: true, error: null });
 
     try {
@@ -59,19 +71,18 @@ export function useAiAnalyze() {
         signal: ctrl.signal,
       });
 
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+
       const isJson = (res.headers.get("content-type") || "").includes("application/json");
       const payload = isJson ? await res.json() : await res.text();
 
       if (!res.ok) {
-        const msg = typeof payload === "string" ? payload || `HTTP ${res.status}` : (payload?.error as string) || `HTTP ${res.status}`;
+        const msg = typeof payload === "string"
+          ? payload || `HTTP ${res.status}`
+          : (payload?.error as string) || `HTTP ${res.status}`;
         const errorResponse: AiAnalyzeResponse = {
-          items: [],
-          bibEntries: [],
-          detectedStyle: "Unknown",
-          confidence: 0,
-          language: req.language ?? "mixed",
-          summary: "",
-          error: msg,
+          items: [], bibEntries: [], detectedStyle: "Unknown",
+          confidence: 0, language: req.language ?? "mixed", summary: "", error: msg,
         };
         setState({ data: errorResponse, loading: false, error: msg });
         return errorResponse;
@@ -81,16 +92,21 @@ export function useAiAnalyze() {
       setState({ data, loading: false, error: null });
       return data;
     } catch (err) {
-      if ((err as Error).name === "AbortError") return null;
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      if ((err as Error).name === "AbortError") {
+        // Distinguish manual cancel vs timeout
+        const msg = "AI-анализ отменён (превышено время ожидания 95 с).";
+        const errorResponse: AiAnalyzeResponse = {
+          items: [], bibEntries: [], detectedStyle: "Unknown",
+          confidence: 0, language: req.language ?? "mixed", summary: "", error: msg,
+        };
+        setState({ data: errorResponse, loading: false, error: msg });
+        return errorResponse;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       const errorResponse: AiAnalyzeResponse = {
-        items: [],
-        bibEntries: [],
-        detectedStyle: "Unknown",
-        confidence: 0,
-        language: req.language ?? "mixed",
-        summary: "",
-        error: msg,
+        items: [], bibEntries: [], detectedStyle: "Unknown",
+        confidence: 0, language: req.language ?? "mixed", summary: "", error: msg,
       };
       setState({ data: errorResponse, loading: false, error: msg });
       return errorResponse;
@@ -99,6 +115,7 @@ export function useAiAnalyze() {
 
   const reset = useCallback(() => {
     abortRef.current?.abort();
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
     setState({ data: null, loading: false, error: null });
   }, []);
 

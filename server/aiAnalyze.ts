@@ -13,8 +13,10 @@ import type { Request, Response } from "express";
 const MODEL = "gemini-2.5-flash";
 const API_VERSION = "v1beta";
 const MAX_TEXT_CHARS = 24_000;
-// FIX 3: retry on 503 with exponential backoff
+// Retry on 503 with exponential backoff
 const RETRY_DELAYS_MS = [1_500, 4_000];
+// Gemini 2.5-flash can take 15-20s on long docs — give it 90s
+const FETCH_TIMEOUT_MS = 90_000;
 
 const SYSTEM_PROMPT = `You are an expert academic citation analysis engine.
 Given a scholarly document, identify ALL inline citations, bibliography entries, and direct quotes.
@@ -73,6 +75,8 @@ async function callGemini(userMsg: string, apiKey: string): Promise<string> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      // Fix: give Gemini 2.5-flash enough time to respond on large documents
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
 
     if (res.ok) {
@@ -84,7 +88,7 @@ async function callGemini(userMsg: string, apiKey: string): Promise<string> {
 
     const errText = (await res.text()).slice(0, 400);
 
-    // FIX 3: retry only on 503 (transient overload)
+    // Retry only on 503 (transient overload)
     if (res.status === 503 && attempt < RETRY_DELAYS_MS.length) {
       lastError = new Error(`Gemini ${res.status}: ${errText}`);
       continue;
@@ -138,6 +142,11 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
       summary:       typeof parsed.summary === "string" ? parsed.summary : "",
     });
   } catch (err) {
-    res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    const msg = err instanceof Error ? err.message : String(err);
+    // Surface timeout as a readable message
+    const friendly = msg.includes("TimeoutError") || msg.includes("signal timed out")
+      ? "Gemini не ответил за 90 секунд. Попробуйте с более коротким документом."
+      : msg;
+    res.status(502).json({ error: friendly });
   }
 }
