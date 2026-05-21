@@ -3,16 +3,12 @@
  *
  * Sends document text to the AI endpoint and returns enriched citation data.
  * If the endpoint is unavailable (501/502) the caller should fall back to
- * the heuristic-only path. For convenience, this hook also returns
- * an AiAnalyzeResponse with an `error` field when the server responds
- * with a non-2xx status so that UI code can show a proper message.
+ * the heuristic-only path.
  */
 
 import { useState, useCallback, useRef } from "react";
 import type { FoundItem, CitationStyle } from "./analyze";
 
-// Client timeout is slightly longer than server (90s) so the server
-// error message reaches the client before the browser aborts the request.
 const CLIENT_TIMEOUT_MS = 95_000;
 
 export interface AiAnalyzeRequest {
@@ -36,6 +32,8 @@ export interface AiAnalyzeResponse {
   confidence: number;
   language: "ru" | "en" | "mixed";
   summary: string;
+  /** Full document text with citations converted to the requested targetStyle, or null */
+  convertedText: string | null;
   error?: string;
 }
 
@@ -51,14 +49,11 @@ export function useAiAnalyze() {
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const analyze = useCallback(async (req: AiAnalyzeRequest) => {
-    // Cancel any in-flight request
     abortRef.current?.abort();
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-
-    // Client-side timeout: abort after CLIENT_TIMEOUT_MS
     timeoutRef.current = setTimeout(() => ctrl.abort(), CLIENT_TIMEOUT_MS);
 
     setState({ data: null, loading: true, error: null });
@@ -82,7 +77,8 @@ export function useAiAnalyze() {
           : (payload?.error as string) || `HTTP ${res.status}`;
         const errorResponse: AiAnalyzeResponse = {
           items: [], bibEntries: [], detectedStyle: "Unknown",
-          confidence: 0, language: req.language ?? "mixed", summary: "", error: msg,
+          confidence: 0, language: req.language ?? "mixed", summary: "",
+          convertedText: null, error: msg,
         };
         setState({ data: errorResponse, loading: false, error: msg });
         return errorResponse;
@@ -94,11 +90,11 @@ export function useAiAnalyze() {
     } catch (err) {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       if ((err as Error).name === "AbortError") {
-        // Distinguish manual cancel vs timeout
         const msg = "AI-анализ отменён (превышено время ожидания 95 с).";
         const errorResponse: AiAnalyzeResponse = {
           items: [], bibEntries: [], detectedStyle: "Unknown",
-          confidence: 0, language: req.language ?? "mixed", summary: "", error: msg,
+          confidence: 0, language: req.language ?? "mixed", summary: "",
+          convertedText: null, error: msg,
         };
         setState({ data: errorResponse, loading: false, error: msg });
         return errorResponse;
@@ -106,7 +102,8 @@ export function useAiAnalyze() {
       const msg = err instanceof Error ? err.message : String(err);
       const errorResponse: AiAnalyzeResponse = {
         items: [], bibEntries: [], detectedStyle: "Unknown",
-        confidence: 0, language: req.language ?? "mixed", summary: "", error: msg,
+        confidence: 0, language: req.language ?? "mixed", summary: "",
+        convertedText: null, error: msg,
       };
       setState({ data: errorResponse, loading: false, error: msg });
       return errorResponse;

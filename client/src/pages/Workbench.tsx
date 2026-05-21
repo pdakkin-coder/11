@@ -4,6 +4,7 @@ import {
   Upload, Download, Link2, RefreshCw, CheckCircle2, Hash, Type,
   AlignLeft, ArrowLeftRight, AlertTriangle, Pencil, Save,
   RotateCcw, Bold, Italic, Underline as UnderlineIcon, List, Sparkles,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,7 +33,7 @@ import {
 import { importFile } from "@/lib/importDoc";
 import { exportDocument, type ExportFormat } from "@/lib/exportDoc";
 import { apiRequest } from "@/lib/queryClient";
-import { useAiAnalyze, mergeFoundItems } from "@/lib/aiAnalyze";
+import { useAiAnalyze, mergeFoundItems, type AiAnalyzeResponse } from "@/lib/aiAnalyze";
 
 type Panel = "structure" | "citations" | "style" | "convert" | "editor" | "stats";
 
@@ -79,15 +80,16 @@ function legendDotClass(type: FoundItem["type"]): string {
   }
 }
 
+// FIX: ключ "канцелярит" синхронизирован с типом EditorIssue в analyze.ts
 const ISSUE_LABELS: Record<EditorIssue["type"], string> = {
-  "длинное-предложение":     "Длинное предложение",
-  "пассив":                  "Пассивная конструкция",
-  "разговорный-маркер":      "Разговорный оборот",
-  "слабая-формулировка":     "Слабая формулировка",
-  "повтор":                  "Повтор",
-  "неопределённый-указатель":"Неопределённый указатель",
-  "пунктуация":              "Пунктуация",
-  "канцеляризм":             "Канцеляризм",
+  "длинное-предложение":      "Длинное предложение",
+  "пассив":                   "Пассивная конструкция",
+  "разговорный-маркер":       "Разговорный оборот",
+  "слабая-формулировка":      "Слабая формулировка",
+  "повтор":                   "Повтор",
+  "неопределённый-указатель": "Неопределённый указатель",
+  "пунктуация":               "Пунктуация",
+  "канцелярит":               "Канцеляризм",
 };
 
 // ── Drag-to-resize hook ───────────────────────────────────────────────────────
@@ -156,6 +158,8 @@ export default function Workbench() {
   const [aiFound, setAiFound]           = useState<FoundItem[] | null>(null);
   const { analyze: runAiAnalysis, loading: aiLoading, data: aiData, error: aiError } = useAiAnalyze();
   const [aiSetupOpen, setAiSetupOpen]   = useState(false);
+  // Track which targetStyle was used for the last AI analysis (for ConvertPanel)
+  const [aiTargetStyle, setAiTargetStyle] = useState<CitationStyle | null>(null);
   const [customRules, setCustomRules]   = useState<CustomCitationRules>({
     name: "Авторский стандарт",
     mode: "author-date",
@@ -168,7 +172,6 @@ export default function Workbench() {
   const [editMode, setEditMode]         = useState(false);
   const [draft, setDraft]               = useState<string>(SAMPLE_DOC);
 
-  // Resizable panels
   const sidebar    = useDragResize(224, 160, 320, "right");
   const rightPanel = useDragResize(360, 260, 560, "left");
 
@@ -189,12 +192,21 @@ export default function Workbench() {
     readingMinutes:   Math.max(1, Math.round(countWords(text) / 180)),
   }), [text, structure.paragraphs]);
 
-  // FIX 1: Check for GEMINI_API_KEY (not OPENAI_API_KEY)
-  async function handleAiAnalyze() {
+  /**
+   * Run AI analysis with an optional targetStyle for conversion.
+   * Called both from the header button (no target) and from ConvertPanel (with target).
+   */
+  async function handleAiAnalyze(targetStyle?: CitationStyle) {
     if (!text.trim()) return;
-    const result = await runAiAnalysis({ text, language: structure.language });
+    const req = {
+      text,
+      language: structure.language,
+      ...(targetStyle ? { targetStyle } : {}),
+    };
+    const result = await runAiAnalysis(req);
     if (result && result.items?.length) {
       setAiFound(result.items as FoundItem[]);
+      if (targetStyle) setAiTargetStyle(targetStyle);
       toast({
         title: "AI-анализ завершён",
         description: result.summary || `Найдено ${result.items.length} элементов (уверенность ${Math.round((result.confidence ?? 0) * 100)}%).`,
@@ -206,6 +218,7 @@ export default function Workbench() {
       }
       toast({ title: "AI недоступен", description: msg, variant: "destructive" });
     } else {
+      if (targetStyle) setAiTargetStyle(targetStyle);
       toast({ title: "AI-анализ завершён", description: "Дополнительные цитаты не обнаружены." });
     }
   }
@@ -232,7 +245,7 @@ export default function Workbench() {
     setText(imported.text);
     setDraft(imported.text);
     setWarnings(imported.warnings);
-    setPreview(null); setSelected(null); setAiFound(null);
+    setPreview(null); setSelected(null); setAiFound(null); setAiTargetStyle(null);
     if (imported.warnings.length > 0) {
       toast({ title: "Файл загружен с предупреждениями", description: imported.warnings[0] });
     }
@@ -252,7 +265,7 @@ export default function Workbench() {
       setText(data.text ?? "");
       setDraft(data.text ?? "");
       setWarnings(data.warnings ?? []);
-      setPreview(null); setSelected(null); setLinkDialogOpen(false); setLinkUrl(""); setAiFound(null);
+      setPreview(null); setSelected(null); setLinkDialogOpen(false); setLinkUrl(""); setAiFound(null); setAiTargetStyle(null);
       if (data.warnings?.length) {
         toast({ title: "Импорт завершён с предупреждениями", description: data.warnings[0] });
       }
@@ -296,19 +309,17 @@ export default function Workbench() {
     const doc = DEMO_DOCS.find((d) => d.id === id);
     if (!doc) return;
     setText(doc.text); setDraft(doc.text); setDocName(doc.label + ".txt");
-    setPreview(null); setSelected(null); setSearch(""); setTypeFilter("all"); setWarnings([]); setAiFound(null);
+    setPreview(null); setSelected(null); setSearch(""); setTypeFilter("all"); setWarnings([]); setAiFound(null); setAiTargetStyle(null);
   }
 
   function applyConversion() {
     if (!preview) return;
     const t = preview.target;
-    setText(preview.text); setDraft(preview.text); setPreview(null); setAiFound(null);
+    setText(preview.text); setDraft(preview.text); setPreview(null); setAiFound(null); setAiTargetStyle(null);
     toast({ title: "Конвертация применена", description: `Документ переформатирован в ${t}.` });
   }
 
   const currentText = preview?.text ?? text;
-
-  // FIX 2: show success status bar ONLY when there is no error
   const aiStatusOk = !aiLoading && !!aiData && !aiError;
 
   return (
@@ -351,7 +362,7 @@ export default function Workbench() {
           <Button variant="outline" size="sm" onClick={handleDriveExport} disabled={driveLoading} data-testid="button-export-drive">
             <Upload className="h-4 w-4 mr-1.5" />{driveLoading ? "Drive…" : "В Drive"}
           </Button>
-          <Button variant="outline" size="sm" onClick={handleAiAnalyze} disabled={aiLoading || !text.trim()} data-testid="button-ai-analyze"
+          <Button variant="outline" size="sm" onClick={() => handleAiAnalyze()} disabled={aiLoading || !text.trim()} data-testid="button-ai-analyze"
             title="Анализ цитирования через Gemini AI. Требует GEMINI_API_KEY.">
             <Sparkles className="h-4 w-4 mr-1.5" />{aiLoading ? "AI…" : "AI-анализ"}
           </Button>
@@ -365,7 +376,7 @@ export default function Workbench() {
         </div>
       </header>
 
-      {/* ── AI Status bar (FIX 2: guard with aiStatusOk) ───────────────────── */}
+      {/* ── AI Status bar ───────────────────────────────────────────────────── */}
       {(aiLoading || aiData || aiError) && (
         <div className="h-7 border-b px-4 flex items-center gap-2 text-[11px] bg-muted/40">
           <Sparkles className="h-3.5 w-3.5 text-primary" />
@@ -374,6 +385,9 @@ export default function Workbench() {
             <span>
               AI‑анализ активен: {aiData!.items.length} элементов, стиль{" "}
               {aiData!.detectedStyle} ({Math.round((aiData!.confidence ?? 0) * 100)}%).
+              {aiData!.convertedText && aiTargetStyle && (
+                <> · конвертация в <strong>{aiTargetStyle}</strong> готова.</>
+              )}
             </span>
           )}
           {!aiLoading && aiError && (
@@ -583,6 +597,10 @@ export default function Workbench() {
                     previewActive={!!preview} applyPreview={applyConversion}
                     onDiscard={() => setPreview(null)}
                     onRun={(target, converted) => setPreview({ target, text: converted })}
+                    aiData={aiData}
+                    aiLoading={aiLoading}
+                    aiTargetStyle={aiTargetStyle}
+                    onAiConvert={(target) => handleAiAnalyze(target)}
                   />
                 )}
                 {panel === "structure" && <StructurePanel structure={structure} onJump={() => {}} />}
@@ -861,23 +879,53 @@ function Score({ label, value }: { label: string; value: number }) {
   );
 }
 
-function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, previewActive, applyPreview, onDiscard }: {
-  detected: ReturnType<typeof detectStyle>; onRun: (target: CitationStyle, converted: string) => void;
-  text: string; customRules: CustomCitationRules; setCustomRules: (r: CustomCitationRules) => void;
-  previewActive: boolean; applyPreview: () => void; onDiscard: () => void;
+function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, previewActive, applyPreview, onDiscard, aiData, aiLoading, aiTargetStyle, onAiConvert }: {
+  detected: ReturnType<typeof detectStyle>;
+  onRun: (target: CitationStyle, converted: string) => void;
+  text: string;
+  customRules: CustomCitationRules;
+  setCustomRules: (r: CustomCitationRules) => void;
+  previewActive: boolean;
+  applyPreview: () => void;
+  onDiscard: () => void;
+  aiData: AiAnalyzeResponse | null;
+  aiLoading: boolean;
+  aiTargetStyle: CitationStyle | null;
+  onAiConvert: (target: CitationStyle) => void;
 }) {
   const [target, setTarget] = useState<CitationStyle>("APA");
+
+  // Use AI convertedText if it was produced for the currently selected target style
+  const aiConvertedAvailable =
+    !!aiData?.convertedText && !aiLoading && aiTargetStyle === target;
+
   const result = useMemo(() => {
-    try {
-      return convertCitations(text, target, customRules);
-    } catch {
-      return { text, converted: 0, warnings: ["Ошибка при конвертации. Проверьте формат документа."] };
+    // If AI already produced a conversion for this exact target — use it
+    if (aiConvertedAvailable && aiData!.convertedText) {
+      return {
+        text: aiData!.convertedText,
+        converted: 1,
+        warnings: [] as string[],
+        source: "ai" as const,
+      };
     }
-  }, [text, target, customRules]);
+    // Fallback: heuristic converter
+    try {
+      const r = convertCitations(text, target, customRules);
+      return { ...r, source: "heuristic" as const };
+    } catch {
+      return {
+        text,
+        converted: 0,
+        warnings: ["Ошибка при конвертации. Проверьте формат документа."],
+        source: "heuristic" as const,
+      };
+    }
+  }, [text, target, customRules, aiConvertedAvailable, aiData]);
 
   return (
     <div className="space-y-4">
-      <PanelHeader title="Конвертация стиля" hint="1) Выберите целевой стиль. 2) Нажмите «Предпросмотр конвертации». 3) Проверьте изменения и нажмите «Применить»." />
+      <PanelHeader title="Конвертация стиля" hint="Выберите целевой стиль и нажмите кнопку конвертации." />
       <div className="space-y-1.5">
         <Label className="text-[12px]">Целевой стиль</Label>
         <Select value={target} onValueChange={(v) => setTarget(v as CitationStyle)}>
@@ -889,6 +937,7 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
           </SelectContent>
         </Select>
       </div>
+
       {target === "Custom" && (
         <div className="space-y-2 rounded-lg border p-3 bg-muted/20">
           <div className="text-[12px] font-medium mb-1">Пользовательский стиль</div>
@@ -918,16 +967,30 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
           </div>
         </div>
       )}
+
+      {/* Status block */}
       <div className="rounded-md border p-3 bg-muted/10 space-y-1.5">
         <div className="flex items-center justify-between">
-          <span className="text-[12px] font-medium">Статус конвертации</span>
-          <Badge variant="outline" className="text-[10px]">{result.converted} изменений</Badge>
+          <span className="text-[12px] font-medium">Статус</span>
+          <div className="flex items-center gap-1.5">
+            {result.source === "ai" && (
+              <Badge variant="default" className="text-[9px] gap-1 py-0">
+                <Sparkles className="h-2.5 w-2.5" />AI
+              </Badge>
+            )}
+            <Badge variant="outline" className="text-[10px]">{result.converted} изменений</Badge>
+          </div>
         </div>
-        {result.converted === 0 && (
+        {result.source === "ai" && (
+          <div className="text-[11px] text-muted-foreground">
+            Конвертация выполнена Gemini — проверьте результат вручную.
+          </div>
+        )}
+        {result.source === "heuristic" && result.converted === 0 && (
           <div className="text-[11px] text-muted-foreground">
             {target === detected.style
-              ? `ℹ Документ уже в формате ${target} — конвертация не требуется.`
-              : "ℹ Конвертер не смог автоматически изменить ссылки. Возможно, документ уже в целевом стиле или формат не распознан."}
+              ? `ℹ Документ уже в формате ${target}.`
+              : "ℹ Эвристика не нашла подходящих замен. Попробуйте AI-конвертацию."}
           </div>
         )}
         {result.warnings.length > 0 && (
@@ -936,6 +999,8 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
           </div>
         )}
       </div>
+
+      {/* Action buttons */}
       {previewActive ? (
         <div className="flex gap-2">
           <Button size="sm" className="flex-1" onClick={applyPreview} data-testid="button-apply-convert">
@@ -946,9 +1011,35 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
           </Button>
         </div>
       ) : (
-        <Button className="w-full" size="sm" onClick={() => onRun(target, result.text)} data-testid="button-run-convert">
-          <RefreshCw className="h-3.5 w-3.5 mr-1.5" />Предпросмотр конвертации
-        </Button>
+        <div className="space-y-2">
+          {/* One-click AI convert */}
+          <Button
+            className="w-full"
+            size="sm"
+            variant="default"
+            disabled={aiLoading}
+            onClick={() => onAiConvert(target)}
+            data-testid="button-ai-convert"
+            title="Отправить документ в Gemini для точной конвертации стиля"
+          >
+            {aiLoading ? (
+              <><RefreshCw className="h-3.5 w-3.5 mr-1.5 animate-spin" />AI конвертирует…</>
+            ) : (
+              <><Zap className="h-3.5 w-3.5 mr-1.5" />Конвертировать через AI → {target}</>
+            )}
+          </Button>
+          {/* Heuristic fallback */}
+          <Button
+            className="w-full"
+            size="sm"
+            variant="outline"
+            onClick={() => onRun(target, result.text)}
+            data-testid="button-run-convert"
+            title="Локальная эвристическая конвертация (без AI)"
+          >
+            <RefreshCw className="h-3.5 w-3.5 mr-1.5" />Предпросмотр (эвристика)
+          </Button>
+        </div>
       )}
       <Separator />
       <SourceTypeBuilder />
@@ -956,22 +1047,24 @@ function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, prev
   );
 }
 
+// FIX: StructurePanel — исправлено переполнение блоков статистики
 function StructurePanel({ structure, onJump }: { structure: ReturnType<typeof analyzeStructure>; onJump: (line: number) => void }) {
   const stats = [
-    { label: "Параграфов",     value: structure.paragraphs },
-    { label: "Разделов",       value: structure.sections.length },
-    { label: "Сносок",         value: structure.footnoteCount },
-    { label: "Библ. записей",  value: structure.bibCount },
+    { label: "Параграфов",    value: structure.paragraphs },
+    { label: "Разделов",      value: structure.sections.length },
+    { label: "Сносок",        value: structure.footnoteCount },
+    { label: "Библ. записей", value: structure.bibCount },
   ];
 
   return (
     <div className="space-y-4">
       <PanelHeader title="Структура документа" hint="Разделы и аннотированные блоки." />
+      {/* FIX: убраны фиксированные высоты, overflow:hidden и text-center которые вызывали выход за экран */}
       <div className="grid grid-cols-2 gap-2">
         {stats.map(({ label, value }) => (
-          <div key={label} className="rounded-md border bg-muted/20 px-3 py-2 text-center overflow-hidden">
-            <div className="text-[22px] font-semibold tabular-nums leading-none mb-1">{value}</div>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide leading-tight truncate">{label}</div>
+          <div key={label} className="rounded-md border bg-muted/20 px-3 py-2.5 flex flex-col items-center min-w-0">
+            <div className="text-[20px] font-semibold tabular-nums leading-none mb-1 truncate w-full text-center">{value}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide leading-tight text-center w-full break-words hyphens-auto">{label}</div>
           </div>
         ))}
       </div>
@@ -986,7 +1079,7 @@ function StructurePanel({ structure, onJump }: { structure: ReturnType<typeof an
                 className="w-full text-left text-[12px] px-2 py-1.5 rounded hover:bg-accent/50 transition-colors flex items-baseline gap-2 min-w-0"
               >
                 <span className="text-muted-foreground font-mono text-[10px] w-5 shrink-0">{s.line}</span>
-                <span className="truncate flex-1">{s.text}</span>
+                <span className="truncate flex-1 min-w-0">{s.text}</span>
               </button>
             ))}
           </div>
@@ -1051,15 +1144,15 @@ function StatsPanel({ stats, found, issues, detected }: {
     <div className="space-y-4">
       <PanelHeader title="Статистика документа" />
       <div className="space-y-0">
-        <Metric label="Слов"                value={stats.words.toLocaleString("ru")} />
-        <Metric label="Знаков (с пробелами)" value={stats.charsWithSpaces.toLocaleString("ru")} />
+        <Metric label="Слов"                 value={stats.words.toLocaleString("ru")} />
+        <Metric label="Знаков (с пробелами)"  value={stats.charsWithSpaces.toLocaleString("ru")} />
         <Metric label="Знаков (без пробелов)" value={stats.charsNoSpaces.toLocaleString("ru")} />
-        <Metric label="Параграфов"          value={stats.paragraphs} />
-        <Metric label="Строк"               value={stats.lines} />
-        <Metric label="Время чтения"        value={`~${stats.readingMinutes} мин.`} />
-        <Metric label="Цитат и сносок"      value={found.length} />
-        <Metric label="Замечаний редактуры" value={issues.length} />
-        <Metric label="Определённый стиль"  value={detected.style} />
+        <Metric label="Параграфов"           value={stats.paragraphs} />
+        <Metric label="Строк"                value={stats.lines} />
+        <Metric label="Время чтения"         value={`~${stats.readingMinutes} мин.`} />
+        <Metric label="Цитат и сносок"       value={found.length} />
+        <Metric label="Замечаний редактуры"  value={issues.length} />
+        <Metric label="Определённый стиль"   value={detected.style} />
       </div>
     </div>
   );

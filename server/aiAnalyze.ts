@@ -13,20 +13,23 @@ import type { Request, Response } from "express";
 const MODEL = "gemini-2.5-flash";
 const API_VERSION = "v1beta";
 const MAX_TEXT_CHARS = 24_000;
-// Retry on 503 with exponential backoff
 const RETRY_DELAYS_MS = [1_500, 4_000];
-// Gemini 2.5-flash can take 15-20s on long docs — give it 90s
 const FETCH_TIMEOUT_MS = 90_000;
 
 const SYSTEM_PROMPT = `You are an expert academic citation analysis engine.
 Given a scholarly document, identify ALL inline citations, bibliography entries, and direct quotes.
 Determine the citation style (APA 7, Chicago 17, MLA 9, IEEE, Vancouver, Harvard, GOST 7.0.5).
+If the user provides a Target style, also return the FULL DOCUMENT text with ALL citations
+converted into that target style as the "convertedText" field. Preserve all non-citation wording exactly.
+If target style matches detected style or no conversion is needed, set "convertedText" to null.
+
 Return ONLY valid JSON — no markdown fences, no prose:
 {
   "detectedStyle": "APA"|"Chicago"|"MLA"|"IEEE"|"Vancouver"|"Harvard"|"GOST"|"Unknown",
   "confidence": 0.0-1.0,
   "language": "ru"|"en"|"mixed",
   "summary": "one-sentence description",
+  "convertedText": "full document with converted citations, or null",
   "items": [
     {
       "id": "ai-0",
@@ -55,7 +58,7 @@ async function callGemini(userMsg: string, apiKey: string): Promise<string> {
   const body = {
     contents: [
       { role: "user",  parts: [{ text: SYSTEM_PROMPT }] },
-      { role: "model", parts: [{ text: "Understood. I will analyze the document and return only valid JSON." }] },
+      { role: "model", parts: [{ text: "Understood. I will analyze the document and return only valid JSON with no markdown fences." }] },
       { role: "user",  parts: [{ text: userMsg }] },
     ],
     generationConfig: {
@@ -75,7 +78,6 @@ async function callGemini(userMsg: string, apiKey: string): Promise<string> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      // Fix: give Gemini 2.5-flash enough time to respond on large documents
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
 
@@ -83,12 +85,16 @@ async function callGemini(userMsg: string, apiKey: string): Promise<string> {
       const json = (await res.json()) as {
         candidates?: { content?: { parts?: { text?: string }[] } }[];
       };
-      return json.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+      const raw = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+      // Strip markdown fences that Gemini may include despite responseMimeType
+      return raw
+        .replace(/^\s*```(?:json)?\s*/i, "")
+        .replace(/\s*```\s*$/i, "")
+        .trim();
     }
 
     const errText = (await res.text()).slice(0, 400);
 
-    // Retry only on 503 (transient overload)
     if (res.status === 503 && attempt < RETRY_DELAYS_MS.length) {
       lastError = new Error(`Gemini ${res.status}: ${errText}`);
       continue;
@@ -119,31 +125,41 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
   const rawText = typeof req.body?.text === "string" ? req.body.text : "";
   if (!rawText.trim()) { res.status(400).json({ error: "Текст не передан." }); return; }
 
-  const targetStyle = typeof req.body?.targetStyle === "string" ? req.body.targetStyle : "APA";
+  const targetStyle = typeof req.body?.targetStyle === "string" ? req.body.targetStyle : null;
   const language   = typeof req.body?.language   === "string" ? req.body.language   : detectLang(rawText);
 
   const text = rawText.length > MAX_TEXT_CHARS
     ? rawText.slice(0, MAX_TEXT_CHARS * 0.7) + "\n[...]\n" + rawText.slice(-MAX_TEXT_CHARS * 0.3)
     : rawText;
 
-  const userMsg = [`Language hint: ${language}`, `Target style: ${targetStyle}`, "---BEGIN---", text, "---END---"].join("\n");
+  const hints = [`Language hint: ${language}`];
+  if (targetStyle) hints.push(`Target style for conversion: ${targetStyle}`);
+  const userMsg = [...hints, "---BEGIN---", text, "---END---"].join("\n");
 
   try {
     const raw = await callGemini(userMsg, apiKey);
+
     let parsed: Record<string, unknown> = {};
-    try { parsed = JSON.parse(raw); } catch { /* use empty */ }
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // Если JSON всё равно не распарсился — вернём читаемую ошибку, а не 502
+      throw new Error(
+        "Gemini вернул ответ в неожиданном формате. Попробуйте ещё раз или сократите документ."
+      );
+    }
 
     res.json({
       items:         Array.isArray(parsed.items)      ? parsed.items      : [],
       bibEntries:    Array.isArray(parsed.bibEntries) ? parsed.bibEntries : [],
       detectedStyle: parsed.detectedStyle ?? "Unknown",
       confidence:    typeof parsed.confidence === "number" ? parsed.confidence : 0,
-      language:      parsed.language ?? language,
+      language:      (parsed.language as string) ?? language,
       summary:       typeof parsed.summary === "string" ? parsed.summary : "",
+      convertedText: typeof parsed.convertedText === "string" ? parsed.convertedText : null,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // Surface timeout as a readable message
     const friendly = msg.includes("TimeoutError") || msg.includes("signal timed out")
       ? "Gemini не ответил за 90 секунд. Попробуйте с более коротким документом."
       : msg;
