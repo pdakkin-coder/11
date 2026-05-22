@@ -25,6 +25,14 @@ Given a scholarly document, perform THREE tasks:
    Vancouver, Harvard, GOST 7.0.5). For each item return exact span, line,
    character offsets, confidence score, and optional note.
 
+   GOST 7.0.5 specific markers to look for:
+   - Initials pattern: Иванов И.И. (surname then initials with dots)
+   - Place of publication: М.: / СПб.: / Л.: (Russian city abbreviation + colon)
+   - Electronic resource tag: [Электронный ресурс]
+   - Volume/issue: Т. N, № N
+   - Page range: С. N–N
+   - Inline references: [N] or [Фамилия И.О., год, с. N]
+
 3. BLOCK ANNOTATION — for each identified citation/quote block assign an
    annotation type: "inline-apa" | "inline-numeric" | "footnote" |
    "bibliography" | "ibid" | "quote".
@@ -82,6 +90,17 @@ Rules:
 - Return the FULL converted document in "convertedText".
 - Also return individual bibEntries with "converted" fields.
 - Set "convertedText" to null only if no changes were needed.
+
+GOST 7.0.5-2008 FORMATTING RULES (apply when targetStyle is "GOST"):
+- Author format: Фамилия И.О. (surname first, then initials with dots, comma-separated for multiple)
+- Inline citation: [N] where N is sequential reference number
+- Book entry:     Фамилия И.О. Название. — Место : Издательство, Год. — N с.
+- Journal entry:  Фамилия И.О. Название статьи // Журнал. — Год. — Т. N, № N. — С. N–N. — DOI: 10.xxx (if available)
+- Web resource:   Фамилия И.О. Название [Электронный ресурс]. — URL: https://... (дата обращения: ДД.ММ.ГГГГ).
+- Thesis:         Фамилия И.О. Название : дис. … канд./д-р наук / Учреждение. — Место, Год. — N с.
+- Use em-dash (—) as separator between bibliographic fields
+- Use Russian guillemets «» for titles when appropriate
+- City abbreviations: Москва → М., Санкт-Петербург → СПб., Ленинград → Л.
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -191,8 +210,17 @@ export async function handleAiConvert(req: Request, res: Response): Promise<void
 
   const language = typeof req.body?.language === "string" ? req.body.language : detectLang(rawText);
   const text = truncate(rawText);
+
+  // Append language-specific instruction context
+  const langInstruction = language === "ru"
+    ? "The document is in Russian. Apply Russian academic conventions: guillemets «» for quotations, em-dash (—) as bibliographic separator, Cyrillic initials format."
+    : language === "mixed"
+    ? "The document mixes Russian and English. Handle both scripts correctly."
+    : "The document is in English.";
+
   const userMsg = [
     `Language hint: ${language}`,
+    langInstruction,
     `Target style: ${targetStyle}`,
     `Scope: ${scope.join(", ")}`,
     "---BEGIN---",

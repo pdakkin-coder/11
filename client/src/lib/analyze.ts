@@ -65,6 +65,7 @@ export interface SourceTypeTemplate {
   label: string;
   fields: string[];
   apaTemplate: string;
+  gostTemplate?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,12 +110,15 @@ export const DEFAULT_SOURCE_TYPES: SourceTypeTemplate[] = [
     fields: ["author", "year", "title", "journal", "volume", "issue", "pages", "doi"],
     apaTemplate:
       "{author} ({year}). {title}. {journal}, {volume}({issue}), {pages}. https://doi.org/{doi}",
+    gostTemplate:
+      "{author} {title} // {journal}. — {year}. — Т. {volume}, № {issue}. — С. {pages}. — DOI: {doi}.",
   },
   {
     id: "book",
     label: "Книга",
     fields: ["author", "year", "title", "publisher", "place"],
     apaTemplate: "{author} ({year}). {title}. {publisher}.",
+    gostTemplate: "{author} {title}. — {place} : {publisher}, {year}.",
   },
   {
     id: "chapter",
@@ -122,36 +126,95 @@ export const DEFAULT_SOURCE_TYPES: SourceTypeTemplate[] = [
     fields: ["author", "year", "title", "editor", "bookTitle", "pages", "publisher"],
     apaTemplate:
       "{author} ({year}). {title}. In {editor} (Ed.), {bookTitle} (pp. {pages}). {publisher}.",
+    gostTemplate:
+      "{author} {title} // {bookTitle} / под ред. {editor}. — {publisher}, {year}. — С. {pages}.",
   },
   {
     id: "web",
     label: "Веб-источник",
     fields: ["author", "year", "title", "url", "accessed"],
     apaTemplate: "{author} ({year}). {title}. Retrieved {accessed}, from {url}",
+    gostTemplate:
+      "{author} {title} [Электронный ресурс]. — URL: {url} (дата обращения: {accessed}).",
   },
   {
     id: "thesis",
     label: "Диссертация",
     fields: ["author", "year", "title", "type", "institution"],
     apaTemplate: "{author} ({year}). {title} [{type}]. {institution}.",
+    gostTemplate:
+      "{author} {title} : {type} / {institution}. — {year}.",
   },
   {
     id: "report",
     label: "Отчёт / рабочий документ",
     fields: ["author", "year", "title", "number", "institution"],
     apaTemplate: "{author} ({year}). {title} (Report No. {number}). {institution}.",
+    gostTemplate:
+      "{author} {title} : отчёт / {institution}. — {year}. — № {number}.",
   },
   {
     id: "conference",
     label: "Материалы конференции",
     fields: ["author", "year", "title", "conference", "pages", "place"],
     apaTemplate: "{author} ({year}). {title}. In {conference} (pp. {pages}). {place}.",
+    gostTemplate:
+      "{author} {title} // {conference}. — {place}, {year}. — С. {pages}.",
   },
   {
     id: "newspaper",
     label: "Газетная статья",
     fields: ["author", "year", "title", "newspaper", "date", "pages"],
     apaTemplate: "{author} ({year}, {date}). {title}. {newspaper}, {pages}.",
+    gostTemplate:
+      "{author} {title} // {newspaper}. — {year}. — {date}. — С. {pages}.",
+  },
+];
+
+/**
+ * GOST 7.0.5-2008 specific source type templates.
+ * Used when targetStyle === "GOST" in SourceTypeBuilder.
+ */
+export const GOST_SOURCE_TYPES: SourceTypeTemplate[] = [
+  {
+    id: "gost-journal",
+    label: "Статья в журнале (ГОСТ)",
+    fields: ["author", "title", "journal", "year", "volume", "issue", "pages", "doi"],
+    apaTemplate: "{author} ({year}). {title}. {journal}, {volume}({issue}), {pages}.",
+    gostTemplate:
+      "{author} {title} // {journal}. — {year}. — Т. {volume}, № {issue}. — С. {pages}.{doi}",
+  },
+  {
+    id: "gost-book",
+    label: "Книга / монография (ГОСТ)",
+    fields: ["author", "title", "place", "publisher", "year", "pages"],
+    apaTemplate: "{author} ({year}). {title}. {publisher}.",
+    gostTemplate:
+      "{author} {title}. — {place} : {publisher}, {year}. — {pages} с.",
+  },
+  {
+    id: "gost-web",
+    label: "Электронный ресурс (ГОСТ)",
+    fields: ["author", "title", "url", "accessed", "year"],
+    apaTemplate: "{author} ({year}). {title}. Retrieved {accessed}, from {url}",
+    gostTemplate:
+      "{author} {title} [Электронный ресурс]. — URL: {url} (дата обращения: {accessed}).",
+  },
+  {
+    id: "gost-chapter",
+    label: "Глава в сборнике (ГОСТ)",
+    fields: ["author", "title", "bookTitle", "editor", "place", "publisher", "year", "pages"],
+    apaTemplate: "{author} ({year}). {title}. In {editor} (Ed.), {bookTitle} (pp. {pages}). {publisher}.",
+    gostTemplate:
+      "{author} {title} // {bookTitle} / под ред. {editor}. — {place} : {publisher}, {year}. — С. {pages}.",
+  },
+  {
+    id: "gost-thesis",
+    label: "Диссертация / автореферат (ГОСТ)",
+    fields: ["author", "title", "type", "institution", "place", "year", "pages"],
+    apaTemplate: "{author} ({year}). {title} [{type}]. {institution}.",
+    gostTemplate:
+      "{author} {title} : {type}. — {place}, {year}. — {pages} с.",
   },
 ];
 
@@ -181,12 +244,18 @@ export const SOURCE_TYPE_FIELD_LABELS: Record<string, string> = {
 export function renderSourceTemplate(
   template: SourceTypeTemplate,
   fields: Record<string, string>,
+  style: "apa" | "gost" = "apa",
 ): string {
-  let out = template.apaTemplate;
+  const tpl = style === "gost" && template.gostTemplate
+    ? template.gostTemplate
+    : template.apaTemplate;
+  let out = tpl;
   for (const [k, v] of Object.entries(fields)) {
     out = out.replaceAll(`{${k}}`, v || `[${k}]`);
   }
   out = out.replace(/\{[a-zA-Z]+\}/g, "");
+  // Clean up empty DOI suffix in GOST journal template
+  out = out.replace(/\.\[doi\]$/, ".");
   return out.trim();
 }
 
@@ -233,6 +302,7 @@ function overlaps(found: FoundItem[], start: number, end: number): boolean {
  *  - Vancouver false-positive fix: skip pure year parens (1999)
  *  - Footnote: detect * and — prefixed lines as footnote markers
  *  - isBibEntryLine: DOI signal + GOST М./СПб. pattern
+ *  - Smith (2019) APA variant without comma (author-year no comma)
  */
 export function findCitations(text: string): FoundItem[] {
   const found: FoundItem[] = [];
@@ -250,6 +320,24 @@ export function findCitations(text: string): FoundItem[] {
       end: s + m[0].length,
       line: lineOf(text, s),
       confidence: 0.9,
+    });
+  }
+
+  // ── 1b. APA without comma: Smith (2019) or Smith et al. (2019) ──────────
+  const apaNoComma =
+    /\b[A-ZА-ЯЁ][a-zа-яё]+(?:\s+et al\.?)?\s+\((?:19|20)\d{2}(?:[a-z])?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu;
+  for (const m of text.matchAll(apaNoComma)) {
+    const s = m.index!;
+    if (overlaps(found, s, s + m[0].length)) continue;
+    found.push({
+      id: nextId("apa-nc"),
+      type: "inline-apa",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.85,
+      note: "APA no-comma variant",
     });
   }
 
@@ -330,8 +418,6 @@ export function findCitations(text: string): FoundItem[] {
     if (overlaps(found, s, s + m[0].length)) continue;
     // False-positive guard: skip (YYYY) — standalone year parenthetical
     if (/^\((?:19|20)\d{2}\)$/.test(m[0])) continue;
-    // Skip single small numbers that look like (1) in non-citation context
-    // only if surrounded by word chars (e.g. "step (1)" vs citation)
     found.push({
       id: nextId("van"),
       type: "inline-numeric",
@@ -525,7 +611,7 @@ export function findCitations(text: string): FoundItem[] {
   return found.sort((a, b) => a.start - b.start);
 }
 
-function isBibEntryLine(line: string): boolean {
+export function isBibEntryLine(line: string): boolean {
   if (line.length < 30) return false;
   // Must start with capital letter, digit, or opening bracket
   if (!/^[A-ZА-ЯЁ\[\d]/.test(line)) return false;
@@ -537,10 +623,16 @@ function isBibEntryLine(line: string): boolean {
   if (/\.\s+[A-ZА-ЯЁ]/.test(line)) signals++;
   // GOST: DOI signal
   if (/\bDOI:\s*10\./.test(line)) signals++;
-  // GOST: place of publication pattern (М.:, СПб.:)
+  // GOST: place of publication pattern (М.:, СПб.:, Л.:, Новосибирск:)
   if (/[–—]\s*[МСПб]{1,3}\.\s*:/u.test(line)) signals++;
+  // GOST: city colon publisher dash year pattern
+  if (/:\s*[А-ЯЁ][а-яё]+[,.]\s*\d{4}/.test(line)) signals++;
   // ГОСТ: [Электронный ресурс]
-  if (/\[Электронный ресурс\]/.test(line)) signals++;
+  if (/\[Электронный ресурс\]/.test(line)) signals += 2;
+  // GOST: initials pattern Иванов И.И.
+  if (/[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\./.test(line)) signals++;
+  // GOST: Т. / № pattern for journal volumes
+  if (/[–—]\s*Т\.\s*\d|[–—]\s*№\s*\d/.test(line)) signals++;
   return signals >= 2;
 }
 
@@ -565,6 +657,7 @@ export function detectStyle(
   const ibidCount     = found.filter((f) => f.type === "ibid").length;
   const bibCount      = found.filter((f) => f.type === "bibliography").length;
   const footnoteCount = found.filter((f) => f.type === "footnote").length;
+  const gostInitCount = found.filter((f) => f.note === "GOST initials").length;
 
   // APA
   let apaScore = 0;
@@ -610,14 +703,18 @@ export function detectStyle(
   if (/,\s*vol\.\s*\d+,\s*no\.\s*\d+,\s*pp\./.test(text)) harvardScore += 0.2;
   scores.push({ style: "Harvard", score: Math.min(harvardScore, 1) });
 
-  // GOST — improved scoring
+  // GOST — enhanced scoring
   let gostScore = 0;
-  gostScore += Math.min(found.filter((f) => f.type === "inline-numeric").length * 0.1, 0.3);
-  gostScore += Math.min(found.filter((f) => f.note === "GOST initials").length * 0.2, 0.4);
-  if (/[–—]\s*[МСПб]{1,3}\.\s*:/u.test(text))   { gostScore += 0.3; notes.push("ГОСТ: место изд. М./СПб."); }
+  gostScore += Math.min(numCount * 0.1, 0.3);
+  // Initials pattern [Иванов И.И.] is a strong GOST signal
+  gostScore += Math.min(gostInitCount * 0.25, 0.5);
+  if (/[–—]\s*[МСПб]{1,3}\.\s*:/u.test(text))    { gostScore += 0.3; notes.push("ГОСТ: место изд. М./СПб."); }
   if (/ГОСТ|Собрание законодательства/.test(text)) gostScore += 0.2;
-  if (/\[Электронный ресурс\]/.test(text))        { gostScore += 0.25; notes.push("ГОСТ: [Электронный ресурс]"); }
+  if (/\[Электронный ресурс\]/.test(text))        { gostScore += 0.3; notes.push("ГОСТ: [Электронный ресурс]"); }
+  if (/[–—]\s*Т\.\s*\d|[–—]\s*№\s*\d/.test(text)) { gostScore += 0.15; notes.push("ГОСТ: Т./№ в библиографии"); }
   if (/Вопросы государственного/.test(text))       gostScore += 0.1;
+  // GOST initials in body text (not just bib)
+  if (/[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\./.test(text)) gostScore += 0.15;
   scores.push({ style: "GOST", score: Math.min(gostScore, 1) });
 
   // Custom
@@ -635,9 +732,10 @@ export function detectStyle(
     ? Math.min((best.score - (second?.score ?? 0) + 0.1) * 1.5, 1)
     : 0;
 
-  if (apaCount > 0)      notes.push(`APA-вставок: ${apaCount}`);
-  if (ibidCount > 0)     notes.push(`Ibid/Там же: ${ibidCount}`);
-  if (numCount > 0)      notes.push(`Числовых ссылок: ${numCount}`);
+  if (apaCount > 0)       notes.push(`APA-вставок: ${apaCount}`);
+  if (ibidCount > 0)      notes.push(`Ibid/Там же: ${ibidCount}`);
+  if (numCount > 0)       notes.push(`Числовых ссылок: ${numCount}`);
+  if (gostInitCount > 0)  notes.push(`ГОСТ инициалы: ${gostInitCount}`);
 
   return {
     style: (best.score > 0.05 ? best.style : "Unknown") as CitationStyle,
@@ -705,9 +803,15 @@ export function convertCitations(
     }
     case "GOST": {
       let n = 1;
+      // Convert APA-style (Author, Year) → [N]
       out = out.replace(
         /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
         () => { converted++; return `[${n++}]`; },
+      );
+      // Convert Author (Year) no-comma variant → [N]
+      out = out.replace(
+        /\b([A-ZА-ЯЁ][a-zа-яё]+(?:\s+et al\.?)?)\s+\((?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+        (_m) => { converted++; return `[${n++}]`; },
       );
       break;
     }
