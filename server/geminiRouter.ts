@@ -2,9 +2,9 @@
  * geminiRouter.ts — Gemini model cascade
  *
  * Cascade order (free-tier AI Studio limits, 2026-05):
- *   1. gemini-2.5-flash   —  5 RPM,  20 RPD  (primary)
- *   2. gemini-1.5-flash   — 15 RPM, 1500 RPD (fallback-1)
- *   3. gemini-1.5-flash-8b — 15 RPM, 1500 RPD (fallback-2, lightest)
+ *   1. gemini-2.5-flash      —  5 RPM,  20 RPD  (primary)
+ *   2. gemini-3.5-flash      —  5 RPM,  20 RPD  (fallback-1)
+ *   3. gemini-3.1-flash-lite — 15 RPM, 500 RPD  (fallback-2)
  *
  * On 429: advance to next model in cascade.
  * On 503: retry within same model (up to 2×), then advance to next model.
@@ -14,14 +14,14 @@
 
 export const MODELS = [
   "gemini-2.5-flash",
-  "gemini-1.5-flash",
-  "gemini-1.5-flash-8b",
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
 ] as const;
 
 export type GeminiModel = typeof MODELS[number];
 
 const API_VERSION      = "v1beta";
-const FETCH_TIMEOUT_MS = 25_000; // 25s per model → 3×25s = 75s < Express timeout
+const FETCH_TIMEOUT_MS = 25_000;
 const RETRY_DELAYS_MS  = [1_500, 4_000] as const;
 
 async function fetchWithTimeout(
@@ -102,9 +102,8 @@ async function tryModel(
 
       if (isTransient) {
         lastError = e;
-        // Still have retry slots — keep going
         if (attempt < RETRY_DELAYS_MS.length) continue;
-        // Retries exhausted: throw with explicit status so cascade advances
+        // Retries exhausted — throw with explicit status so cascade advances
         const exhausted = new Error(
           `Gemini [${model}] 503: перегружена после ${attempt + 1} попыток`,
         ) as Error & { status: number };
@@ -117,7 +116,6 @@ async function tryModel(
     }
   }
 
-  // Unreachable — but satisfies TS
   throw lastError ?? new Error(`Gemini [${model}]: все попытки исчерпаны`);
 }
 
