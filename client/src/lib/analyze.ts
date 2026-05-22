@@ -141,6 +141,10 @@ const FOOTNOTE_HEADERS = [
   "Note",
 ];
 
+// GOST publication cities used in bibliographic records
+const GOST_CITIES_RE =
+  /[–—]\s*(?:М|СПб|Л|Нск|Екб|Новосибирск|Москва|Санкт-Петербург|Ленинград|Екатеринбург)\s*[.:]/u;
+
 // ---------------------------------------------------------------------------
 // Source type templates (for SourceTypeBuilder UI)
 // ---------------------------------------------------------------------------
@@ -258,29 +262,38 @@ export const GOST_SOURCE_TYPES: SourceTypeTemplate[] = [
     gostTemplate:
       "{author} {title} : {type}. — {place}, {year}. — {pages} с.",
   },
+  {
+    id: "gost-law",
+    label: "Нормативно-правовой акт (ГОСТ)",
+    fields: ["title", "year", "number", "source", "pages"],
+    apaTemplate: "{title} ({year}). No. {number}. {source}.",
+    gostTemplate:
+      "{title} : от {year} г. № {number} // {source}. — С. {pages}.",
+  },
 ];
 
 export const SOURCE_TYPE_FIELD_LABELS: Record<string, string> = {
-  author:     "Автор(ы)",
-  year:       "Год",
-  title:      "Название",
-  journal:    "Журнал",
-  volume:     "Том",
-  issue:      "Выпуск",
-  pages:      "Страницы",
-  doi:        "DOI",
-  publisher:  "Издательство",
-  place:      "Место издания",
-  editor:     "Редактор(ы)",
-  bookTitle:  "Название сборника",
-  url:        "URL",
-  accessed:   "Дата обращения",
-  type:       "Тип (дисс. / thesis)",
-  institution:"Учреждение",
-  number:     "Номер отчёта",
-  conference: "Конференция",
-  date:       "Дата публикации",
-  newspaper:  "Газета",
+  author:      "Автор(ы)",
+  year:        "Год",
+  title:       "Название",
+  journal:     "Журнал",
+  volume:      "Том",
+  issue:       "Выпуск",
+  pages:       "Страницы",
+  doi:         "DOI",
+  publisher:   "Издательство",
+  place:       "Место издания",
+  editor:      "Редактор(ы)",
+  bookTitle:   "Название сборника",
+  url:         "URL",
+  accessed:    "Дата обращения",
+  type:        "Тип (дисс. / thesis)",
+  institution: "Учреждение",
+  number:      "Номер отчёта / закона",
+  conference:  "Конференция",
+  date:        "Дата публикации",
+  newspaper:   "Газета",
+  source:      "Источник публикации",
 };
 
 export function renderSourceTemplate(
@@ -338,13 +351,23 @@ function overlaps(found: FoundItem[], start: number, end: number): boolean {
 
 /**
  * Main heuristic citation finder.
- * Improvements over previous version:
- *  - GOST initials pattern: Иванов И.И.,
- *  - Markdown footnotes: [^1] and ^[1]
- *  - Vancouver false-positive fix: skip pure year parens (1999)
- *  - Footnote: detect * and — prefixed lines as footnote markers
- *  - isBibEntryLine: DOI signal + GOST М./СПб. pattern
- *  - Smith (2019) APA variant without comma (author-year no comma)
+ *
+ * Supported formats:
+ *  - APA inline:       (Author, Year) / (Author & Author, Year) / (Author et al., Year)
+ *  - APA no-comma:     Smith (2019), Smith et al. (2019)
+ *  - Harvard:          (Author Year) without comma
+ *  - GOST initials:    [Иванов И.И., 2020, с. 5]
+ *  - GOST/IEEE numeric:[1] [1, с. 12] [1–3]
+ *  - GOST law ref:     Ст. 5 Федерального закона от …
+ *  - Markdown footnote:[^1] / ^[1]
+ *  - Vancouver:        (1) (2,3) (5–7) — with false-positive year guard
+ *  - Chicago super:    .[1]
+ *  - MLA page ref:     (142) (pp. 88–90)
+ *  - Ibid / Там же
+ *  - Direct quotes:    «…», "…", "…"
+ *  - Custom:           {Author Year:page}
+ *  - Footnote entries: digit-dot, * / — prefix, Unicode superscripts ¹²³
+ *  - Bibliography entries: full-line heuristic
  */
 export function findCitations(text: string): FoundItem[] {
   const found: FoundItem[] = [];
@@ -366,6 +389,7 @@ export function findCitations(text: string): FoundItem[] {
   }
 
   // ── 1b. APA without comma: Smith (2019) or Smith et al. (2019) ──────────
+  // Fixes the known gap: this variant was not previously captured by detectStyle
   const apaNoComma =
     /\b[A-ZА-ЯЁ][a-zа-яё]+(?:\s+et al\.?)?\s+\((?:19|20)\d{2}(?:[a-z])?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu;
   for (const m of text.matchAll(apaNoComma)) {
@@ -385,7 +409,7 @@ export function findCitations(text: string): FoundItem[] {
 
   // ── 2. Harvard inline: (Author Year) without comma ──────────────────────
   const harvardInline =
-    /\([A-ZА-ЯЁ][a-zа-яё]+(?:\s+et al\.?)?\s+(?:19|20)\d{2}(?:,\s*p\.\s*\d+)?\)/gu;
+    /\([A-ZА-ЯЁ][a-zа-яё]+(?:\s+et al\.)?\s+(?:19|20)\d{2}(?:,\s*p\.\s*\d+)?\)/gu;
   for (const m of text.matchAll(harvardInline)) {
     const s = m.index!;
     if (overlaps(found, s, s + m[0].length)) continue;
@@ -433,6 +457,24 @@ export function findCitations(text: string): FoundItem[] {
       end: s + m[0].length,
       line: lineOf(text, s),
       confidence: 0.9,
+    });
+  }
+
+  // ── 4b. GOST law/normative ref: «Ст. N ФЗ № N от DD.MM.YYYY» ───────────
+  const gostLaw =
+    /(?:ст(?:атья|ья)?|п(?:ункт)?|ч(?:асть)?)\.\s*\d+[,\s]*(?:[Фф]едерального закона|[Кк]одекса|[Пп]оложения|[Пп]остановления)[^.;]{5,80}(?:№\s*[\d-]+)?/gu;
+  for (const m of text.matchAll(gostLaw)) {
+    const s = m.index!;
+    if (overlaps(found, s, s + m[0].length)) continue;
+    found.push({
+      id: nextId("gost-law"),
+      type: "inline-numeric",
+      text: m[0],
+      start: s,
+      end: s + m[0].length,
+      line: lineOf(text, s),
+      confidence: 0.8,
+      note: "GOST law ref",
     });
   }
 
@@ -665,8 +707,8 @@ export function isBibEntryLine(line: string): boolean {
   if (/\.\s+[A-ZА-ЯЁ]/.test(line)) signals++;
   // GOST: DOI signal
   if (/\bDOI:\s*10\./.test(line)) signals++;
-  // GOST: place of publication pattern (М.:, СПб.:, Л.:, Новосибирск:)
-  if (/[–—]\s*[МСПб]{1,3}\.\s*:/u.test(line)) signals++;
+  // GOST: place of publication — expanded city list
+  if (GOST_CITIES_RE.test(line)) signals++;
   // GOST: city colon publisher dash year pattern
   if (/:\s*[А-ЯЁ][а-яё]+[,.]\s*\d{4}/.test(line)) signals++;
   // ГОСТ: [Электронный ресурс]
@@ -675,6 +717,12 @@ export function isBibEntryLine(line: string): boolean {
   if (/[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\./.test(line)) signals++;
   // GOST: Т. / № pattern for journal volumes
   if (/[–—]\s*Т\.\s*\d|[–—]\s*№\s*\d/.test(line)) signals++;
+  // GOST: double slash // separator (article in collection/journal)
+  if (/\/\/\s*[А-ЯЁA-Z]/.test(line)) signals++;
+  // GOST: multi-volume indicator «В N т.» or «Т. N:»
+  if (/\bВ\s+\d+\s*т\.|[^А-Я]Т\.\s*\d+\s*:/.test(line)) signals++;
+  // GOST: normative act pattern «№ NNN-ФЗ»
+  if (/№\s*\d+[-–]\s*[А-ЯЁ]{2,}/.test(line)) signals++;
   return signals >= 2;
 }
 
@@ -700,10 +748,13 @@ export function detectStyle(
   const bibCount      = found.filter((f) => f.type === "bibliography").length;
   const footnoteCount = found.filter((f) => f.type === "footnote").length;
   const gostInitCount = found.filter((f) => f.note === "GOST initials").length;
+  const gostLawCount  = found.filter((f) => f.note === "GOST law ref").length;
+  // APA no-comma variant was previously missing from scoring
+  const apaNoCommaCount = found.filter((f) => f.note === "APA no-comma variant").length;
 
   // APA
   let apaScore = 0;
-  apaScore += Math.min(apaCount * 0.15, 0.5);
+  apaScore += Math.min((apaCount + apaNoCommaCount) * 0.15, 0.55);
   apaScore += Math.min(bibCount * 0.08, 0.3);
   if (/\(\w+(?:\s*&\s*\w+)?(?:,\s*et al\.?)?\s*,\s*(?:19|20)\d{2}/.test(text)) apaScore += 0.15;
   if (/\bDOI:\s*10\./.test(text)) apaScore += 0.05;
@@ -750,13 +801,18 @@ export function detectStyle(
   gostScore += Math.min(numCount * 0.1, 0.3);
   // Initials pattern [Иванов И.И.] is a strong GOST signal
   gostScore += Math.min(gostInitCount * 0.25, 0.5);
-  if (/[–—]\s*[МСПб]{1,3}\.\s*:/u.test(text))    { gostScore += 0.3; notes.push("ГОСТ: место изд. М./СПб."); }
-  if (/ГОСТ|Собрание законодательства/.test(text)) gostScore += 0.2;
-  if (/\[Электронный ресурс\]/.test(text))        { gostScore += 0.3; notes.push("ГОСТ: [Электронный ресурс]"); }
-  if (/[–—]\s*Т\.\s*\d|[–—]\s*№\s*\d/.test(text)) { gostScore += 0.15; notes.push("ГОСТ: Т./№ в библиографии"); }
-  if (/Вопросы государственного/.test(text))       gostScore += 0.1;
-  // GOST initials in body text (not just bib)
-  if (/[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\./.test(text)) gostScore += 0.15;
+  // Law references are exclusive to GOST context
+  gostScore += Math.min(gostLawCount * 0.2, 0.4);
+  if (GOST_CITIES_RE.test(text))                                 { gostScore += 0.3; notes.push("ГОСТ: место изд. М./СПб./…"); }
+  if (/ГОСТ|Собрание законодательства/.test(text))               gostScore += 0.2;
+  if (/\[Электронный ресурс\]/.test(text))                       { gostScore += 0.3; notes.push("ГОСТ: [Электронный ресурс]"); }
+  if (/[–—]\s*Т\.\s*\d|[–—]\s*№\s*\d/.test(text))              { gostScore += 0.15; notes.push("ГОСТ: Т./№ в библиографии"); }
+  if (/Вопросы государственного/.test(text))                      gostScore += 0.1;
+  if (/[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\./.test(text))          gostScore += 0.15;
+  // Double slash in bib entries: Author Title // Journal is GOST-exclusive
+  if (/\/\/\s*[А-ЯЁ]/.test(text))                               { gostScore += 0.25; notes.push("ГОСТ: разделитель //"); }
+  // Multi-volume markers
+  if (/\bВ\s+\d+\s*т\.|[^А-Я]Т\.\s*\d+\s*:/.test(text))       { gostScore += 0.1; notes.push("ГОСТ: многотомное издание"); }
   scores.push({ style: "GOST", score: Math.min(gostScore, 1) });
 
   // Custom
@@ -774,10 +830,12 @@ export function detectStyle(
     ? Math.min((best.score - (second?.score ?? 0) + 0.1) * 1.5, 1)
     : 0;
 
-  if (apaCount > 0)       notes.push(`APA-вставок: ${apaCount}`);
-  if (ibidCount > 0)      notes.push(`Ibid/Там же: ${ibidCount}`);
-  if (numCount > 0)       notes.push(`Числовых ссылок: ${numCount}`);
-  if (gostInitCount > 0)  notes.push(`ГОСТ инициалы: ${gostInitCount}`);
+  if (apaCount > 0)           notes.push(`APA-вставок: ${apaCount}`);
+  if (apaNoCommaCount > 0)    notes.push(`APA no-comma: ${apaNoCommaCount}`);
+  if (ibidCount > 0)          notes.push(`Ibid/Там же: ${ibidCount}`);
+  if (numCount > 0)           notes.push(`Числовых ссылок: ${numCount}`);
+  if (gostInitCount > 0)      notes.push(`ГОСТ инициалы: ${gostInitCount}`);
+  if (gostLawCount > 0)       notes.push(`ГОСТ нормат. акты: ${gostLawCount}`);
 
   return {
     style: (best.score > 0.05 ? best.style : "Unknown") as CitationStyle,
@@ -986,7 +1044,7 @@ function extractContext(text: string, start: number, end: number): { before: str
 
 /**
  * Build an EvidencePack from raw text and pre-computed FoundItems.
- * This is the primary entry point for the AI pipeline:
+ * Primary entry point for the AI pipeline:
  *   text → findCitations() → buildEvidencePack() → POST /api/ai-analyze
  *
  * The pack replaces "send full text to AI" with a compact JSON payload,
@@ -1060,13 +1118,17 @@ export function findEditorIssues(text: string): EditorIssue[] {
   for (const { s, start } of sentences) {
     const words = s.split(/\s+/).filter(Boolean);
 
-    if (words.length > 40) {
+    // Long sentence — lowered threshold to 35 words for academic texts
+    if (words.length > 35) {
       issues.push({ id: `iss-${issues.length}`, type: "длинное-предложение",
         text: s.slice(0, 120) + (s.length > 120 ? "…" : ""), start, end: start + s.length,
         line: lineOf(text, start), suggestion: "Разбейте на два предложения." });
     }
 
-    if (/\b(?:был[аои]?|были|будет|будут|является|являются|являлся|считается|рассматривается)\s+\w+[нт][а-я]{0,3}\b/u.test(s)) {
+    // Passive voice — extended list of passive constructions
+    if (
+      /\b(?:был[аои]?|были|будет|будут|является|являются|являлся|считается|рассматривается|отмечается|указывается|подчёркивается|выделяется|описывается)\s+\w+[нт][а-я]{0,3}\b/u.test(s)
+    ) {
       issues.push({ id: `iss-${issues.length}`, type: "пассив",
         text: s.slice(0, 100), start, end: start + s.length,
         line: lineOf(text, start), suggestion: "Рассмотрите активный залог." });
@@ -1074,7 +1136,8 @@ export function findEditorIssues(text: string): EditorIssue[] {
 
     const colloquial = [
       /\bпо-видимому\b/iu, /\bна самом деле\b/iu, /\bтак сказать\b/iu,
-      /\bкак бы\b/iu,      /\bну и\b/iu,         /\bпросто\b/iu,
+      /\bкак бы\b/iu,      /\bну и\b/iu,          /\bпросто\b/iu,
+      /\bвообще-то\b/iu,   /\bпо сути\b/iu,        /\bтипа\b/iu,
     ];
     for (const re of colloquial) {
       if (re.test(s)) {
@@ -1088,7 +1151,8 @@ export function findEditorIssues(text: string): EditorIssue[] {
     const weak = [
       /\bможно считать\b/iu,          /\bнекоторым образом\b/iu,
       /\bв той или иной мере\b/iu,    /\bв какой-то степени\b/iu,
-      /\bдостаточно [а-я]+\b/iu,
+      /\bдостаточно [а-я]+\b/iu,      /\bпо всей видимости\b/iu,
+      /\bпо-своему\b/iu,
     ];
     for (const re of weak) {
       if (re.test(s)) {
@@ -1106,8 +1170,9 @@ export function findEditorIssues(text: string): EditorIssue[] {
     }
 
     const kancelary = [
-      /\bв целях\b/iu,    /\bв рамках\b/iu,         /\bосуществление\b/iu,
-      /\bреализация мер\b/iu, /\bв соответствии с\b/iu, /\bна основании вышеизложенного\b/iu,
+      /\bв целях\b/iu,         /\bв рамках\b/iu,              /\bосуществление\b/iu,
+      /\bреализация мер\b/iu,  /\bв соответствии с\b/iu,      /\bна основании вышеизложенного\b/iu,
+      /\bпринять меры\b/iu,    /\bосуществить мероприятия\b/iu, /\bпредставляется возможным\b/iu,
     ];
     for (const re of kancelary) {
       if (re.test(s)) {
@@ -1116,6 +1181,13 @@ export function findEditorIssues(text: string): EditorIssue[] {
           line: lineOf(text, start), suggestion: "Упростите канцелярский оборот." });
         break;
       }
+    }
+
+    // Punctuation: double spaces
+    if (/\s{2,}/.test(s)) {
+      issues.push({ id: `iss-${issues.length}`, type: "пунктуация",
+        text: s.slice(0, 100), start, end: start + s.length,
+        line: lineOf(text, start), suggestion: "Удалите лишние пробелы." });
     }
   }
 
