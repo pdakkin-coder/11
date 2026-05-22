@@ -20,7 +20,7 @@ export const MODELS = [
 export type GeminiModel = typeof MODELS[number];
 
 const API_VERSION      = "v1beta";
-const FETCH_TIMEOUT_MS = 30_000; // 30s per model — slow models need more time
+const FETCH_TIMEOUT_MS = 30_000;
 
 async function fetchWithTimeout(
   url: string,
@@ -41,16 +41,20 @@ async function callGeminiModel(
   generationConfig: object,
   apiKey: string,
   model: GeminiModel,
+  systemInstruction?: object,
 ): Promise<string> {
   const url =
     `https://generativelanguage.googleapis.com/${API_VERSION}/models/${model}:generateContent?key=${apiKey}`;
+
+  const body: Record<string, unknown> = { contents, generationConfig };
+  if (systemInstruction) body.systemInstruction = systemInstruction;
 
   const res = await fetchWithTimeout(
     url,
     {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ contents, generationConfig }),
+      body:    JSON.stringify(body),
     },
     FETCH_TIMEOUT_MS,
   );
@@ -73,21 +77,16 @@ async function callGeminiModel(
   throw err;
 }
 
-/**
- * Try one model.
- * - 429 / 503: throw immediately so cascade advances.
- * - AbortError / network (status===undefined): one retry after 1s, then throw.
- * - Everything else: throw immediately.
- */
 async function tryModel(
   contents: object[],
   generationConfig: object,
   apiKey: string,
   model: GeminiModel,
+  systemInstruction?: object,
 ): Promise<string> {
   for (let attempt = 0; attempt <= 1; attempt++) {
     try {
-      return await callGeminiModel(contents, generationConfig, apiKey, model);
+      return await callGeminiModel(contents, generationConfig, apiKey, model, systemInstruction);
     } catch (err) {
       const e = err as Error & { status?: number; name?: string };
 
@@ -114,17 +113,15 @@ export interface GeminiResult {
   model: GeminiModel;
 }
 
-/**
- * Main cascade: walk MODELS[], advance on 429 or 503.
- */
 export async function callGemini(
   contents: object[],
   generationConfig: object,
   apiKey: string,
+  systemInstruction?: object,
 ): Promise<GeminiResult> {
   for (const model of MODELS) {
     try {
-      const raw = await tryModel(contents, generationConfig, apiKey, model);
+      const raw = await tryModel(contents, generationConfig, apiKey, model, systemInstruction);
       console.info(`[gemini-router] success with ${model}`);
       return { raw, model };
     } catch (err) {
