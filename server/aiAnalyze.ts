@@ -5,12 +5,11 @@
  * Body: { text: string; targetStyle?: string; language?: string }
  *
  * Requires GEMINI_API_KEY in environment.
- * Model cascade (geminiRouter.ts):
- *   gemini-2.5-flash → gemini-3.5-flash → gemini-3.1-flash-lite
+ * Uses gemini-2.5-flash via geminiRouter.ts.
  */
 
 import type { Request, Response } from "express";
-import { callGemini } from "./geminiRouter.js";
+import { callGemini, GeminiError } from "./geminiRouter.js";
 
 const MAX_TEXT_CHARS = 24_000;
 
@@ -64,56 +63,10 @@ Return ONLY valid JSON — no markdown fences, no prose:
 function detectLang(text: string): "ru" | "en" | "mixed" {
   const ru = (text.match(/[а-яёА-ЯЁ]/gu) ?? []).length;
   const en = (text.match(/[a-zA-Z]/gu) ?? []).length;
-  const t = ru + en;
-  if (!t) return "ru";
-  const r = ru / t;
-  return r > 0.7 ? "ru" : r < 0.3 ? "en" : "mixed";
-}
-
-/** Classify an error into a user-friendly Russian message. */
-function friendlyError(err: unknown): { message: string; status: number } {
-  const msg  = err instanceof Error ? err.message : String(err);
-  const name = err instanceof Error ? (err.name ?? "") : "";
-  const httpStatus = (err as { status?: number }).status;
-
-  // AbortError = our fetchWithTimeout fired — this is a TIMEOUT, not a network error
-  if (
-    name === "AbortError" ||
-    msg.includes("AbortError") ||
-    msg.includes("aborted") ||
-    msg.includes("timed out") ||
-    msg.includes("TimeoutError")
-  ) {
-    return {
-      message: `Gemini не ответил за отведённое время. Попробуйте с более коротким документом или повторите запрос.`,
-      status: 504,
-    };
-  }
-
-  // All models exhausted
-  if (msg.includes("Все модели Gemini") || msg.includes("RPD")) {
-    return { message: msg, status: 503 };
-  }
-
-  // Network / DNS
-  if (
-    msg.includes("fetch failed") ||
-    msg.includes("ENOTFOUND") ||
-    msg.includes("ECONNREFUSED") ||
-    msg.includes("ECONNRESET")
-  ) {
-    return {
-      message: "Не удалось подключиться к Gemini API. Проверьте интернет-соединение.",
-      status: 502,
-    };
-  }
-
-  // JSON parse error from model
-  if (msg.includes("неожиданном формате")) {
-    return { message: msg, status: 502 };
-  }
-
-  return { message: msg, status: httpStatus ?? 502 };
+  const total = ru + en;
+  if (!total) return "ru";
+  const ratio = ru / total;
+  return ratio > 0.7 ? "ru" : ratio < 0.3 ? "en" : "mixed";
 }
 
 export async function handleAiAnalyze(req: Request, res: Response): Promise<void> {
@@ -124,56 +77,62 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
   }
 
   const rawText = typeof req.body?.text === "string" ? req.body.text : "";
-  if (!rawText.trim()) { res.status(400).json({ error: "Текст не передан." }); return; }
+  if (!rawText.trim()) {
+    res.status(400).json({ error: "Текст не передан." });
+    return;
+  }
 
   const targetStyle = typeof req.body?.targetStyle === "string" ? req.body.targetStyle : null;
-  const language   = typeof req.body?.language   === "string" ? req.body.language   : detectLang(rawText);
+  const language = typeof req.body?.language === "string"
+    ? req.body.language as "ru" | "en" | "mixed"
+    : detectLang(rawText);
 
+  // Trim to limit — keep beginning and end of document
   const text = rawText.length > MAX_TEXT_CHARS
-    ? rawText.slice(0, MAX_TEXT_CHARS * 0.7) + "\n[...]\n" + rawText.slice(-MAX_TEXT_CHARS * 0.3)
+    ? rawText.slice(0, Math.floor(MAX_TEXT_CHARS * 0.7))
+      + "\n[...]документ сокращён до 24к символов...\n"
+      + rawText.slice(-Math.floor(MAX_TEXT_CHARS * 0.3))
     : rawText;
 
-  const hints = [`Language hint: ${language}`];
+  const hints: string[] = [`Language hint: ${language}`];
   if (targetStyle) hints.push(`Target style for conversion: ${targetStyle}`);
   const userMsg = [...hints, "---BEGIN DOCUMENT---", text, "---END DOCUMENT---"].join("\n");
 
-  // systemInstruction carries the role-less prompt — avoids the role:"model" first-turn bug
   const systemInstruction = { parts: [{ text: SYSTEM_PROMPT }] };
-  const contents = [
-    { role: "user", parts: [{ text: userMsg }] },
-  ];
-
-  // responseMimeType is NOT used — it is unsupported by gemini-3.5-flash / gemini-3.1-flash-lite
-  // and causes 400 Bad Request which breaks the cascade. JSON is extracted via markdown-fence
-  // stripping in geminiRouter.ts instead.
-  const generationConfig = {
-    temperature: 0,
-  };
+  const contents = [{ role: "user", parts: [{ text: userMsg }] }];
+  const generationConfig = { temperature: 0 };
 
   try {
-    const { raw, model } = await callGemini(contents, generationConfig, apiKey, systemInstruction);
+    const raw = await callGemini(contents, generationConfig, apiKey, systemInstruction);
 
-    let parsed: Record<string, unknown> = {};
+    let parsed: Record<string, unknown>;
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      throw new Error(
-        "Gemini вернул ответ в неожиданном формате. Попробуйте ещё раз или сократите документ."
-      );
+      console.error("[ai-analyze] JSON parse failed, raw:", raw.slice(0, 200));
+      res.status(502).json({
+        error: "Gemini вернул ответ не в JSON-формате. Попробуйте ещё раз или сократите документ.",
+      });
+      return;
     }
 
     res.json({
       items:         Array.isArray(parsed.items)      ? parsed.items      : [],
       bibEntries:    Array.isArray(parsed.bibEntries) ? parsed.bibEntries : [],
-      detectedStyle: parsed.detectedStyle ?? "Unknown",
-      confidence:    typeof parsed.confidence === "number" ? parsed.confidence : 0,
-      language:      (parsed.language as string) ?? language,
-      summary:       typeof parsed.summary === "string" ? parsed.summary : "",
+      detectedStyle: typeof parsed.detectedStyle === "string" ? parsed.detectedStyle : "Unknown",
+      confidence:    typeof parsed.confidence    === "number" ? parsed.confidence    : 0,
+      language:      typeof parsed.language      === "string" ? parsed.language      : language,
+      summary:       typeof parsed.summary       === "string" ? parsed.summary       : "",
       convertedText: typeof parsed.convertedText === "string" ? parsed.convertedText : null,
-      _model:        model,
+      _model:        "gemini-2.5-flash",
+      _label:        "Gemini 2.5 Flash",
     });
   } catch (err) {
-    const { message, status } = friendlyError(err);
-    res.status(status).json({ error: message });
+    if (err instanceof GeminiError) {
+      res.status(err.httpStatus).json({ error: err.message });
+      return;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: msg });
   }
 }

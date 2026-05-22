@@ -1,62 +1,70 @@
 /**
- * geminiRouter.ts — Gemini model cascade
+ * geminiRouter.ts — single Gemini API call, no cascade
  *
- * Cascade order (free-tier AI Studio limits, 2026-05):
- *   1. gemini-2.5-flash      —  5 RPM,  20 RPD  (primary)
- *   2. gemini-3.5-flash      —  5 RPM,  20 RPD  (fallback-1)
- *   3. gemini-3.1-flash-lite — 15 RPM, 500 RPD  (fallback-2)
- *
- * On any error (429, 503, timeout, network): advance to next model.
- * All models exhausted: throw with UTC-midnight RPD reset hint.
+ * Makes one request to gemini-2.5-flash.
+ * Returns the raw text from the model response.
+ * Throws a typed GeminiError on any failure.
  */
 
-export const MODELS = [
-  "gemini-2.5-flash",
-  "gemini-3.5-flash",
-  "gemini-3.1-flash-lite",
-] as const;
+export const MODEL = "gemini-2.5-flash";
+const API_VERSION  = "v1beta";
+const TIMEOUT_MS   = 60_000; // 60s — generous for large documents
 
-export type GeminiModel = typeof MODELS[number];
-
-const API_VERSION      = "v1beta";
-const FETCH_TIMEOUT_MS = 30_000;
-
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
+export class GeminiError extends Error {
+  constructor(
+    message: string,
+    public readonly httpStatus: number,
+    public readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = "GeminiError";
   }
 }
 
-async function callGeminiModel(
+function parseRetryAfter(body: string): number | undefined {
+  // Gemini 429 body contains "Please retry in 54.41s"
+  const match = body.match(/retry in ([\d.]+)s/i);
+  return match ? Math.ceil(parseFloat(match[1])) * 1000 : undefined;
+}
+
+export async function callGemini(
   contents: object[],
   generationConfig: object,
   apiKey: string,
-  model: GeminiModel,
   systemInstruction?: object,
 ): Promise<string> {
-  const url =
-    `https://generativelanguage.googleapis.com/${API_VERSION}/models/${model}:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/${API_VERSION}/models/${MODEL}:generateContent?key=${apiKey}`;
 
   const body: Record<string, unknown> = { contents, generationConfig };
   if (systemInstruction) body.systemInstruction = systemInstruction;
 
-  const res = await fetchWithTimeout(
-    url,
-    {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify(body),
-    },
-    FETCH_TIMEOUT_MS,
-  );
+      signal:  controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    const e = err as Error;
+    if (e.name === "AbortError") {
+      throw new GeminiError(
+        "Gemini не ответил за 60 секунд. Попробуйте с более коротким документом.",
+        504,
+      );
+    }
+    throw new GeminiError(
+      `Не удалось подключиться к Gemini API: ${e.message}`,
+      502,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (res.ok) {
     const json = (await res.json()) as {
@@ -69,47 +77,28 @@ async function callGeminiModel(
       .trim();
   }
 
-  const errText = (await res.text()).slice(0, 600);
-  console.error(`[gemini-router] ${model} HTTP ${res.status}: ${errText}`);
-  const err = new Error(`Gemini [${model}] ${res.status}: ${errText}`) as Error & { status: number };
-  err.status = res.status;
-  throw err;
-}
+  const errBody = await res.text();
+  console.error(`[gemini] HTTP ${res.status}:`, errBody.slice(0, 400));
 
-export interface GeminiResult {
-  raw: string;
-  model: GeminiModel;
-}
-
-/**
- * Main cascade: walk MODELS[], advance on ANY error.
- */
-export async function callGemini(
-  contents: object[],
-  generationConfig: object,
-  apiKey: string,
-  systemInstruction?: object,
-): Promise<GeminiResult> {
-  let lastError: unknown;
-
-  for (const model of MODELS) {
-    try {
-      const raw = await callGeminiModel(contents, generationConfig, apiKey, model, systemInstruction);
-      console.info(`[gemini-router] success with ${model}`);
-      return { raw, model };
-    } catch (err) {
-      const e = err as Error & { status?: number };
-      lastError = err;
-      console.warn(`[gemini-router] ${model} failed (${e.status ?? "network"}), trying next model…`);
-      continue;
-    }
+  if (res.status === 429) {
+    const retryAfterMs = parseRetryAfter(errBody);
+    const seconds = retryAfterMs ? Math.ceil(retryAfterMs / 1000) : 60;
+    throw new GeminiError(
+      `Лимит запросов Gemini исчерпан. Повторите через ${seconds} секунд.`,
+      429,
+      retryAfterMs,
+    );
   }
 
-  const lastMsg = lastError instanceof Error ? lastError.message : String(lastError);
-  throw new Error(
-    `Все модели Gemini недоступны (${MODELS.join(" → ")}). ` +
-    `Последняя ошибка: ${lastMsg}. ` +
-    `RPD сбрасывается в полночь UTC. ` +
-    `Подождите или проверьте план: https://ai.dev/rate-limit`,
+  if (res.status === 503) {
+    throw new GeminiError(
+      "Gemini API временно перегружен. Повторите через несколько секунд.",
+      503,
+    );
+  }
+
+  throw new GeminiError(
+    `Gemini API ошибка ${res.status}. Повторите запрос.`,
+    res.status >= 500 ? 502 : 400,
   );
 }
