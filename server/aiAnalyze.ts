@@ -71,20 +71,28 @@ function detectLang(text: string): "ru" | "en" | "mixed" {
 }
 
 /** Classify an error into a user-friendly Russian message. */
-function friendlyError(err: unknown): string {
+function friendlyError(err: unknown): { message: string; status: number } {
   const msg  = err instanceof Error ? err.message : String(err);
   const name = err instanceof Error ? (err.name ?? "") : "";
+  const httpStatus = (err as { status?: number }).status;
 
-  // Abort / timeout (AbortError from fetchWithTimeout, or Node abort)
+  // AbortError = our fetchWithTimeout fired — this is a TIMEOUT, not a network error
   if (
     name === "AbortError" ||
     msg.includes("AbortError") ||
     msg.includes("aborted") ||
-    msg.includes("TimeoutError") ||
-    msg.includes("signal timed out") ||
-    msg.includes("timed out")
+    msg.includes("timed out") ||
+    msg.includes("TimeoutError")
   ) {
-    return `Gemini не ответил за отведённое время. Попробуйте с более коротким документом или повторите запрос.`;
+    return {
+      message: `Gemini не ответил за отведённое время. Попробуйте с более коротким документом или повторите запрос.`,
+      status: 504,
+    };
+  }
+
+  // All models exhausted
+  if (msg.includes("Все модели Gemini") || msg.includes("RPD")) {
+    return { message: msg, status: 503 };
   }
 
   // Network / DNS
@@ -92,23 +100,20 @@ function friendlyError(err: unknown): string {
     msg.includes("fetch failed") ||
     msg.includes("ENOTFOUND") ||
     msg.includes("ECONNREFUSED") ||
-    msg.includes("ECONNRESET") ||
-    msg.includes("network")
+    msg.includes("ECONNRESET")
   ) {
-    return "Не удалось подключиться к Gemini API. Проверьте интернет-соединение.";
-  }
-
-  // All models exhausted (quota / overload)
-  if (msg.includes("все модели") || msg.includes("RPD")) {
-    return msg; // already user-friendly from callGemini
+    return {
+      message: "Не удалось подключиться к Gemini API. Проверьте интернет-соединение.",
+      status: 502,
+    };
   }
 
   // JSON parse error from model
   if (msg.includes("неожиданном формате")) {
-    return msg;
+    return { message: msg, status: 502 };
   }
 
-  return msg;
+  return { message: msg, status: httpStatus ?? 502 };
 }
 
 export async function handleAiAnalyze(req: Request, res: Response): Promise<void> {
@@ -166,6 +171,7 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
       _model:        model,
     });
   } catch (err) {
-    res.status(502).json({ error: friendlyError(err) });
+    const { message, status } = friendlyError(err);
+    res.status(status).json({ error: message });
   }
 }
