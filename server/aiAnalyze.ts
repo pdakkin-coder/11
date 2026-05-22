@@ -6,7 +6,7 @@
  *
  * Requires GEMINI_API_KEY in environment.
  * Model cascade (geminiRouter.ts):
- *   gemini-2.5-flash → gemini-1.5-flash → gemini-1.5-flash-8b
+ *   gemini-2.5-flash → gemini-3.5-flash → gemini-3.1-flash-lite
  */
 
 import type { Request, Response } from "express";
@@ -70,6 +70,47 @@ function detectLang(text: string): "ru" | "en" | "mixed" {
   return r > 0.7 ? "ru" : r < 0.3 ? "en" : "mixed";
 }
 
+/** Classify an error into a user-friendly Russian message. */
+function friendlyError(err: unknown): string {
+  const msg  = err instanceof Error ? err.message : String(err);
+  const name = err instanceof Error ? (err.name ?? "") : "";
+
+  // Abort / timeout (AbortError from fetchWithTimeout, or Node abort)
+  if (
+    name === "AbortError" ||
+    msg.includes("AbortError") ||
+    msg.includes("aborted") ||
+    msg.includes("TimeoutError") ||
+    msg.includes("signal timed out") ||
+    msg.includes("timed out")
+  ) {
+    return `Gemini не ответил за отведённое время. Попробуйте с более коротким документом или повторите запрос.`;
+  }
+
+  // Network / DNS
+  if (
+    msg.includes("fetch failed") ||
+    msg.includes("ENOTFOUND") ||
+    msg.includes("ECONNREFUSED") ||
+    msg.includes("ECONNRESET") ||
+    msg.includes("network")
+  ) {
+    return "Не удалось подключиться к Gemini API. Проверьте интернет-соединение.";
+  }
+
+  // All models exhausted (quota / overload)
+  if (msg.includes("все модели") || msg.includes("RPD")) {
+    return msg; // already user-friendly from callGemini
+  }
+
+  // JSON parse error from model
+  if (msg.includes("неожиданном формате")) {
+    return msg;
+  }
+
+  return msg;
+}
+
 export async function handleAiAnalyze(req: Request, res: Response): Promise<void> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -125,15 +166,6 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
       _model:        model,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-
-    const friendly =
-      msg.includes("TimeoutError") || msg.includes("signal timed out")
-        ? "Gemini не ответил за 90 секунд. Попробуйте с более коротким документом."
-        : msg.includes("fetch failed") || msg.includes("ENOTFOUND") || msg.includes("ECONNREFUSED")
-          ? "Не удалось подключиться к Gemini API. Проверьте интернет-соединение."
-          : msg;
-
-    res.status(502).json({ error: friendly });
+    res.status(502).json({ error: friendlyError(err) });
   }
 }
