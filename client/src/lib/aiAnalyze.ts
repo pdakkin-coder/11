@@ -1,183 +1,155 @@
 /**
- * useAiAnalyze — React hook for POST /api/ai-analyze
+ * Client-side hooks for AI analysis and AI conversion.
  *
- * Sends document text to the AI endpoint and returns enriched citation data.
- * Exposes activeModel so the UI can show which Gemini model responded.
- * If the endpoint is unavailable (501/502) the caller should fall back to
- * the heuristic-only path.
+ * useAiAnalyze  → POST /api/ai-analyze  (structure + citation markup)
+ * useAiConvert  → POST /api/ai-convert  (targeted style conversion)
  */
 
-import { useState, useCallback, useRef } from "react";
-import type { FoundItem, CitationStyle } from "./analyze";
-
-// 45 s — generous for Gemini 2.5 Flash but short enough to give user feedback fast
-const CLIENT_TIMEOUT_MS = 45_000;
+import { useState } from "react";
+import { apiRequest } from "./queryClient";
+import type { CitationStyle } from "./analyze";
 
 export interface AiAnalyzeRequest {
   text: string;
-  targetStyle?: CitationStyle;
-  language?: "ru" | "en" | "mixed";
+  language?: string;
 }
 
-export interface AiBibEntry {
+export interface AiConvertRequest {
+  text: string;
+  targetStyle: CitationStyle;
+  language?: string;
+  scopes: ConvertScope[];
+}
+
+export type ConvertScope = "citations" | "bibliography" | "structure" | "typos" | "syntax";
+
+export const CONVERT_SCOPE_LABELS: Record<ConvertScope, string> = {
+  citations:    "Цитаты",
+  bibliography: "Библиография",
+  structure:    "Структура",
+  typos:        "Опечатки",
+  syntax:       "Синтаксис",
+};
+
+export interface FoundItem {
+  id: string;
+  type: "inline-apa" | "inline-numeric" | "footnote" | "bibliography" | "ibid" | "quote";
+  text: string;
+  line: number;
+  start: number;
+  end: number;
+  confidence?: number;
+  note?: string;
+}
+
+export interface BibEntry {
   raw: string;
-  style: string;
-  converted?: string | null;
-  fields: {
-    author?: string;
-    year?: string;
-    title?: string;
-    source?: string;
-    publisher?: string;
-    place?: string;
-    pages?: string;
-    doi?: string;
-    url?: string;
-    volume?: string;
-    issue?: string;
-    type?: string;
-    [key: string]: string | undefined;
-  };
+  style?: string;
+  converted?: string;
+  fields: Record<string, string>;
+  startLine?: number;
+  issues?: string[];
+}
+
+export interface StructureBlock {
+  type: "heading" | "abstract" | "body" | "conclusion" | "bibliography" | "footnotes";
   startLine: number;
+  endLine: number;
+  title?: string;
 }
 
 export interface AiAnalyzeResponse {
   items: FoundItem[];
-  bibEntries: AiBibEntry[];
-  detectedStyle: CitationStyle;
+  bibEntries: BibEntry[];
+  structureBlocks?: StructureBlock[];
+  detectedStyle: string;
   confidence: number;
-  language: "ru" | "en" | "mixed";
+  language: string;
   summary: string;
-  /** Full document text with citations converted to the requested targetStyle, or null */
+  structureSummary?: string;
   convertedText: string | null;
-  /** Gemini model ID that produced the response (e.g. 'gemini-2.5-flash') */
   _model?: string;
-  /** Human-readable model label (e.g. 'Gemini 2.5 Flash') */
-  _label?: string;
   error?: string;
 }
 
-export interface AiAnalyzeState {
-  data:        AiAnalyzeResponse | null;
-  loading:     boolean;
-  error:       string | null;
-  activeModel: string | null;
+export interface AiConvertResponse {
+  bibEntries: BibEntry[];
+  detectedStyle: string;
+  confidence: number;
+  language: string;
+  summary: string;
+  convertedText: string | null;
+  _model?: string;
+  error?: string;
 }
 
-/** Humanise raw error strings coming from the server or browser */
-function humaniseError(raw: string): string {
-  if (
-    raw.includes("fetch failed") ||
-    raw.includes("Failed to fetch") ||
-    raw.includes("NetworkError")
-  ) return "Не удалось подключиться к серверу. Убедитесь, что приложение запущено (npm run dev).";
-
-  if (raw.includes("ENOTFOUND") || raw.includes("ECONNREFUSED"))
-    return "Нет соединения с сервером. Проверьте, что сервер запущен на порту 5000.";
-
-  if (raw.includes("Квота исчерпана") || raw.includes("полночь") || raw.includes("aistudio.google.com"))
-    return raw; // already friendly from router
-
-  if (raw.includes("429"))
-    return "Достигнут лимит запросов к Gemini. Подождите минуту и повторите.";
-
-  if (raw.includes("AbortError") || raw.includes("отменён"))
-    return `AI-анализ отменён (превышено время ожидания ${CLIENT_TIMEOUT_MS / 1000} с).`;
-
-  return raw;
-}
-
+// ── useAiAnalyze ──────────────────────────────────────────────────────────────
 export function useAiAnalyze() {
-  const [state, setState] = useState<AiAnalyzeState>({
-    data: null, loading: false, error: null, activeModel: null,
-  });
-  const abortRef   = useRef<AbortController | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [data, setData]       = useState<AiAnalyzeResponse | null>(null);
+  const [error, setError]     = useState<string | null>(null);
 
-  const analyze = useCallback(async (req: AiAnalyzeRequest) => {
-    abortRef.current?.abort();
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
-
-    const ctrl = new AbortController();
-    abortRef.current  = ctrl;
-    timeoutRef.current = setTimeout(() => ctrl.abort(), CLIENT_TIMEOUT_MS);
-
-    setState({ data: null, loading: true, error: null, activeModel: null });
-
+  async function analyze(req: AiAnalyzeRequest): Promise<AiAnalyzeResponse | null> {
+    setLoading(true); setError(null);
     try {
-      const res = await fetch("/api/ai-analyze", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(req),
-        signal:  ctrl.signal,
-      });
-
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-
-      const isJson = (res.headers.get("content-type") ?? "").includes("application/json");
-      const payload = isJson ? await res.json() : await res.text();
-
-      if (!res.ok) {
-        const rawMsg =
-          typeof payload === "string"
-            ? payload || `HTTP ${res.status}`
-            : (payload as { error?: string })?.error || `HTTP ${res.status}`;
-        const msg = humaniseError(rawMsg);
-        const errorResponse: AiAnalyzeResponse = {
-          items: [], bibEntries: [], detectedStyle: "Unknown",
-          confidence: 0, language: req.language ?? "mixed",
-          summary: "", convertedText: null, error: msg,
-        };
-        setState({ data: errorResponse, loading: false, error: msg, activeModel: null });
-        return errorResponse;
+      const res  = await apiRequest("POST", "/api/ai-analyze", req);
+      const json = await res.json() as AiAnalyzeResponse;
+      if (!res.ok || json.error) {
+        const msg = json.error ?? `HTTP ${res.status}`;
+        setError(msg); setData(null); return { ...json, error: msg };
       }
-
-      const data = payload as AiAnalyzeResponse;
-      const activeModel = data._label ?? data._model ?? null;
-      setState({ data, loading: false, error: null, activeModel });
-      return data;
-
-    } catch (err) {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-
-      // Unified AbortError detection: check both name and message
-      const isAbort =
-        (err instanceof Error && err.name === "AbortError") ||
-        (err instanceof Error && err.message.includes("aborted"));
-
-      const raw = err instanceof Error ? err.message : String(err);
-      const msg = isAbort
-        ? `AI-анализ отменён (превышено время ожидания ${CLIENT_TIMEOUT_MS / 1000} с).`
-        : humaniseError(raw);
-
-      const errorResponse: AiAnalyzeResponse = {
-        items: [], bibEntries: [], detectedStyle: "Unknown",
-        confidence: 0, language: req.language ?? "mixed",
-        summary: "", convertedText: null, error: msg,
-      };
-      setState({ data: errorResponse, loading: false, error: msg, activeModel: null });
-      return errorResponse;
+      setData(json); return json;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg); setData(null);
+      return null;
+    } finally {
+      setLoading(false);
     }
-  }, []);
+  }
 
-  const reset = useCallback(() => {
-    abortRef.current?.abort();
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    setState({ data: null, loading: false, error: null, activeModel: null });
-  }, []);
-
-  return { ...state, analyze, reset };
+  return { analyze, loading, data, error };
 }
 
-/**
- * Merge heuristic FoundItems with AI FoundItems.
- * AI results take priority at the same text offset.
- */
-export function mergeFoundItems(heuristic: FoundItem[], ai: FoundItem[]): FoundItem[] {
-  const result = [...ai];
-  for (const h of heuristic) {
-    const dup = ai.some((a) => Math.abs(a.start - h.start) < 10 && a.type === h.type);
-    if (!dup) result.push(h);
+// ── useAiConvert ──────────────────────────────────────────────────────────────
+export function useAiConvert() {
+  const [loading, setLoading] = useState(false);
+  const [data, setData]       = useState<AiConvertResponse | null>(null);
+  const [error, setError]     = useState<string | null>(null);
+
+  async function convert(req: AiConvertRequest): Promise<AiConvertResponse | null> {
+    setLoading(true); setError(null);
+    try {
+      const res  = await apiRequest("POST", "/api/ai-convert", req);
+      const json = await res.json() as AiConvertResponse;
+      if (!res.ok || json.error) {
+        const msg = json.error ?? `HTTP ${res.status}`;
+        setError(msg); setData(null); return { ...json, error: msg } as AiConvertResponse;
+      }
+      setData(json); return json;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg); setData(null);
+      return null;
+    } finally {
+      setLoading(false);
+    }
   }
-  return result.sort((a, b) => a.start - b.start);
+
+  return { convert, loading, data, error };
+}
+
+// ── mergeFoundItems ───────────────────────────────────────────────────────────
+export function mergeFoundItems(
+  heuristic: FoundItem[],
+  ai: FoundItem[]
+): FoundItem[] {
+  const merged = [...heuristic];
+  for (const aiItem of ai) {
+    const overlap = heuristic.some(
+      (h) => h.start < aiItem.end && h.end > aiItem.start
+    );
+    if (!overlap) merged.push(aiItem);
+  }
+  return merged.sort((a, b) => a.start - b.start);
 }
