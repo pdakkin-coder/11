@@ -3,15 +3,24 @@
  *
  * useAiAnalyze  → POST /api/ai-analyze  (structure + citation markup)
  * useAiConvert  → POST /api/ai-convert  (targeted style conversion)
+ *
+ * buildHeuristicPayload() prepares heuristic fragments for AI analysis,
+ * so the server receives compact snippets instead of the full document.
  */
 
 import { useState } from "react";
 import { apiRequest } from "./queryClient";
-import type { CitationStyle } from "./analyze";
+import type { CitationStyle, FoundItem as HeuristicFoundItem, CitationFragment } from "./analyze";
+import { buildContextFragments } from "./analyze";
+
+export type { CitationFragment };
 
 export interface AiAnalyzeRequest {
   text: string;
   language?: string;
+  /** Pre-extracted citation fragments from heuristic engine. When provided,
+   *  the server builds a compact prompt from snippets instead of full text. */
+  fragments?: CitationFragment[];
 }
 
 export interface AiConvertRequest {
@@ -81,6 +90,19 @@ export interface AiConvertResponse {
   convertedText: string | null;
   _model?: string;
   error?: string;
+}
+
+/**
+ * Build a heuristic payload for AI analysis.
+ * Extracts citation context fragments from already-found heuristic items.
+ * Returns null if no inline citations found (fallback to full-text mode).
+ */
+export function buildHeuristicPayload(
+  text: string,
+  heuristicFound: HeuristicFoundItem[],
+): CitationFragment[] | null {
+  const fragments = buildContextFragments(text, heuristicFound, 60);
+  return fragments.length > 0 ? fragments : null;
 }
 
 // ── useAiAnalyze ──────────────────────────────────────────────────────────────

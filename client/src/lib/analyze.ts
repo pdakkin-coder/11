@@ -67,6 +67,19 @@ export interface SourceTypeTemplate {
   apaTemplate: string;
 }
 
+/** A contextual fragment extracted around a detected citation for AI prompting. */
+export interface CitationFragment {
+  /** Original citation text as found by heuristic */
+  citation: string;
+  /** Surrounding context: ~60 chars before + citation + ~60 chars after */
+  context: string;
+  /** Character offset in original text */
+  start: number;
+  end: number;
+  /** Detected type */
+  type: FoundItem["type"];
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -227,12 +240,6 @@ function overlaps(found: FoundItem[], start: number, end: number): boolean {
 
 /**
  * Main heuristic citation finder.
- * Improvements over previous version:
- *  - GOST initials pattern: Иванов И.И.,
- *  - Markdown footnotes: [^1] and ^[1]
- *  - Vancouver false-positive fix: skip pure year parens (1999)
- *  - Footnote: detect * and — prefixed lines as footnote markers
- *  - isBibEntryLine: DOI signal + GOST М./СПб. pattern
  */
 export function findCitations(text: string): FoundItem[] {
   const found: FoundItem[] = [];
@@ -328,10 +335,7 @@ export function findCitations(text: string): FoundItem[] {
   for (const m of text.matchAll(vancouverInline)) {
     const s = m.index!;
     if (overlaps(found, s, s + m[0].length)) continue;
-    // False-positive guard: skip (YYYY) — standalone year parenthetical
     if (/^\((?:19|20)\d{2}\)$/.test(m[0])) continue;
-    // Skip single small numbers that look like (1) in non-citation context
-    // only if surrounded by word chars (e.g. "step (1)" vs citation)
     found.push({
       id: nextId("van"),
       type: "inline-numeric",
@@ -441,7 +445,6 @@ export function findCitations(text: string): FoundItem[] {
     const trimmed = raw.trimStart();
     const indent = raw.length - trimmed.length;
 
-    // Pattern A: digit+dot/paren footnote line
     if (
       /^\d+[.)\s]\s+\S/.test(trimmed) &&
       trimmed.length > 20 &&
@@ -459,7 +462,6 @@ export function findCitations(text: string): FoundItem[] {
       });
     }
 
-    // Pattern B: * or — prefixed footnote/endnote lines
     if (
       /^[*—–]\s+\S/.test(trimmed) &&
       trimmed.length > 20 &&
@@ -478,7 +480,6 @@ export function findCitations(text: string): FoundItem[] {
       });
     }
 
-    // Pattern C: Unicode superscript markers ¹²³…
     for (const m of raw.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹]/gu)) {
       const s = lineStart + m.index!;
       found.push({
@@ -527,7 +528,6 @@ export function findCitations(text: string): FoundItem[] {
 
 function isBibEntryLine(line: string): boolean {
   if (line.length < 30) return false;
-  // Must start with capital letter, digit, or opening bracket
   if (!/^[A-ZА-ЯЁ\[\d]/.test(line)) return false;
   let signals = 0;
   if (/\b(19|20)\d{2}\b/.test(line)) signals++;
@@ -535,13 +535,40 @@ function isBibEntryLine(line: string): boolean {
   if (/https?:\/\//.test(line)) signals++;
   if (/[A-ZА-ЯЁ][a-zа-яё]{2,}[,:]/.test(line)) signals++;
   if (/\.\s+[A-ZА-ЯЁ]/.test(line)) signals++;
-  // GOST: DOI signal
   if (/\bDOI:\s*10\./.test(line)) signals++;
-  // GOST: place of publication pattern (М.:, СПб.:)
   if (/[–—]\s*[МСПб]{1,3}\.\s*:/u.test(line)) signals++;
-  // ГОСТ: [Электронный ресурс]
   if (/\[Электронный ресурс\]/.test(line)) signals++;
   return signals >= 2;
+}
+
+// ---------------------------------------------------------------------------
+// Contextual fragment extractor for AI prompting
+// ---------------------------------------------------------------------------
+
+/**
+ * For each citation found by the heuristic, extract a context window
+ * of `pad` characters before and after the citation.
+ * These fragments are sent to the AI instead of the full text.
+ */
+export function buildContextFragments(
+  text: string,
+  found: FoundItem[],
+  pad = 60,
+): CitationFragment[] {
+  const inlineCitations = found.filter(
+    (f) => f.type === "inline-apa" || f.type === "inline-numeric" || f.type === "ibid",
+  );
+  return inlineCitations.map((f) => {
+    const ctxStart = Math.max(0, f.start - pad);
+    const ctxEnd   = Math.min(text.length, f.end + pad);
+    return {
+      citation: f.text,
+      context:  text.slice(ctxStart, ctxEnd),
+      start:    f.start,
+      end:      f.end,
+      type:     f.type,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +593,6 @@ export function detectStyle(
   const bibCount      = found.filter((f) => f.type === "bibliography").length;
   const footnoteCount = found.filter((f) => f.type === "footnote").length;
 
-  // APA
   let apaScore = 0;
   apaScore += Math.min(apaCount * 0.15, 0.5);
   apaScore += Math.min(bibCount * 0.08, 0.3);
@@ -574,7 +600,6 @@ export function detectStyle(
   if (/\bDOI:\s*10\./.test(text)) apaScore += 0.05;
   scores.push({ style: "APA", score: Math.min(apaScore, 1) });
 
-  // Chicago
   let chicagoScore = 0;
   chicagoScore += Math.min(ibidCount * 0.2, 0.4);
   chicagoScore += Math.min(footnoteCount * 0.1, 0.3);
@@ -582,35 +607,30 @@ export function detectStyle(
   if (/\bIbid\./.test(text)) chicagoScore += 0.15;
   scores.push({ style: "Chicago", score: Math.min(chicagoScore, 1) });
 
-  // MLA
   let mlaScore = 0;
   mlaScore += Math.min(found.filter((f) => f.note === "MLA page ref").length * 0.15, 0.45);
   if (/Works Cited/i.test(text)) { mlaScore += 0.3; notes.push("Найден раздел Works Cited"); }
   if (/\(\w+\s+\d{1,4}\)/.test(text)) mlaScore += 0.1;
   scores.push({ style: "MLA", score: Math.min(mlaScore, 1) });
 
-  // IEEE
   let ieeeScore = 0;
   if (/\[\d+\]/.test(text)) ieeeScore += 0.25;
   ieeeScore += Math.min(found.filter((f) => f.note === "Chicago" || f.type === "inline-numeric").length * 0.1, 0.3);
   if (/IEEE|Trans\.|Proc\./.test(text)) ieeeScore += 0.2;
   scores.push({ style: "IEEE", score: Math.min(ieeeScore, 1) });
 
-  // Vancouver
   let vanScore = 0;
   vanScore += Math.min(found.filter((f) => f.note === "Vancouver/numeric").length * 0.12, 0.4);
   if (/Lancet|NEJM|BMJ|Ann Rheum/.test(text)) { vanScore += 0.25; notes.push("Медицинское издание"); }
   if (/\(\d+(?:[,;]\s*\d+)*\)/.test(text)) vanScore += 0.1;
   scores.push({ style: "Vancouver", score: Math.min(vanScore, 1) });
 
-  // Harvard
   let harvardScore = 0;
   harvardScore += Math.min(found.filter((f) => f.note === "Harvard style").length * 0.15, 0.45);
   if (/[Hh]arvard/.test(text)) harvardScore += 0.1;
   if (/,\s*vol\.\s*\d+,\s*no\.\s*\d+,\s*pp\./.test(text)) harvardScore += 0.2;
   scores.push({ style: "Harvard", score: Math.min(harvardScore, 1) });
 
-  // GOST — improved scoring
   let gostScore = 0;
   gostScore += Math.min(found.filter((f) => f.type === "inline-numeric").length * 0.1, 0.3);
   gostScore += Math.min(found.filter((f) => f.note === "GOST initials").length * 0.2, 0.4);
@@ -620,7 +640,6 @@ export function detectStyle(
   if (/Вопросы государственного/.test(text))       gostScore += 0.1;
   scores.push({ style: "GOST", score: Math.min(gostScore, 1) });
 
-  // Custom
   let customScore = 0;
   if (/\{[A-ZА-ЯЁ][a-zа-яё]+\s+(?:19|20)\d{2}/.test(text)) {
     customScore += 0.5;
@@ -654,80 +673,98 @@ export function detectStyle(
 export function convertCitations(
   text: string,
   target: CitationStyle,
-  customRules: CustomCitationRules,
+  customRules?: CustomCitationRules,
 ): { text: string; converted: number; warnings: string[] } {
+  // Guard: never throw — return input on empty or invalid
+  if (!text || !text.trim()) {
+    return { text, converted: 0, warnings: ["Текст пуст."] };
+  }
+
   let out = text;
   let converted = 0;
   const warnings: string[] = [];
 
-  switch (target) {
-    case "APA": {
-      out = out.replace(/\[(\d+)\]/g, (_m, n) => { converted++; return `(Source ${n}, 2020)`; });
-      out = out.replace(/\.\[(\d+)\]/g, (_m, n) => { converted++; return ` (Source ${n}, 2020).`; });
-      break;
+  try {
+    switch (target) {
+      case "APA": {
+        out = out.replace(/\[(\d+)\]/g, (_m, n) => { converted++; return `(Source ${n}, 2020)`; });
+        out = out.replace(/\.\[(\d+)\]/g, (_m, n) => { converted++; return ` (Source ${n}, 2020).`; });
+        break;
+      }
+      case "Chicago": {
+        out = out.replace(
+          /\(([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*)?,?\s*((?:19|20)\d{2}[a-z]?)\)/gu,
+          (_m, author, year) => { converted++; return `${author || "Author"}, ${year}.`; },
+        );
+        break;
+      }
+      case "MLA": {
+        out = out.replace(
+          /\(([A-ZА-ЯЁ][a-zа-яё]+)(?:,\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+          (_m, author) => { converted++; return `(${author} 00)`; },
+        );
+        break;
+      }
+      case "IEEE": {
+        let n = 1;
+        out = out.replace(
+          /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+          () => { converted++; return `[${n++}]`; },
+        );
+        break;
+      }
+      case "Vancouver": {
+        let n = 1;
+        out = out.replace(
+          /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+          () => { converted++; return `(${n++})`; },
+        );
+        break;
+      }
+      case "Harvard": {
+        out = out.replace(
+          /\(([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*)?,?\s*((?:19|20)\d{2}[a-z]?)(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+          (_m, author, year) => { converted++; return `(${author || "Author"} ${year})`; },
+        );
+        break;
+      }
+      case "GOST": {
+        let n = 1;
+        out = out.replace(
+          /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+          () => { converted++; return `[${n++}]`; },
+        );
+        break;
+      }
+      case "Custom": {
+        if (!customRules) {
+          warnings.push("Не заданы пользовательские правила конвертации.");
+          break;
+        }
+        const tpl = customRules.inlineTemplate ?? "({author}, {year})";
+        let n = 1;
+        out = out.replace(
+          /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*((?:19|20)\d{2}[a-z]?)(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
+          (_m, year) => {
+            converted++;
+            return tpl
+              .replace("{author}", "Author")
+              .replace("{year}", year)
+              .replace("{n}", String(n++));
+          },
+        );
+        break;
+      }
+      default:
+        break;
     }
-    case "Chicago": {
-      out = out.replace(
-        /\(([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*)?,?\s*((?:19|20)\d{2}[a-z]?)\)/gu,
-        (_m, author, year) => { converted++; return `${author || "Author"}, ${year}.`; },
-      );
-      break;
-    }
-    case "MLA": {
-      out = out.replace(
-        /\(([A-ZА-ЯЁ][a-zа-яё]+)(?:,\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
-        (_m, author) => { converted++; return `(${author} 00)`; },
-      );
-      break;
-    }
-    case "IEEE": {
-      let n = 1;
-      out = out.replace(
-        /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
-        () => { converted++; return `[${n++}]`; },
-      );
-      break;
-    }
-    case "Vancouver": {
-      let n = 1;
-      out = out.replace(
-        /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
-        () => { converted++; return `(${n++})`; },
-      );
-      break;
-    }
-    case "Harvard": {
-      out = out.replace(
-        /\(([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*)?,?\s*((?:19|20)\d{2}[a-z]?)(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
-        (_m, author, year) => { converted++; return `(${author || "Author"} ${year})`; },
-      );
-      break;
-    }
-    case "GOST": {
-      let n = 1;
-      out = out.replace(
-        /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*(?:19|20)\d{2}[a-z]?(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
-        () => { converted++; return `[${n++}]`; },
-      );
-      break;
-    }
-    case "Custom": {
-      const tpl = customRules.inlineTemplate;
-      let n = 1;
-      out = out.replace(
-        /\([A-ZА-ЯЁ][a-zа-яё]+(?:[,\s&]+[A-ZА-ЯЁ][a-zа-яё]+)*(?:,?\s*et al\.?)?\s*,?\s*((?:19|20)\d{2}[a-z]?)(?:,\s*(?:с\.|p\.|pp\.)\s*\d+(?:[–—-]\d+)?)?\)/gu,
-        (_m, year) => {
-          converted++;
-          return tpl
-            .replace("{author}", "Author")
-            .replace("{year}", year)
-            .replace("{n}", String(n++));
-        },
-      );
-      break;
-    }
-    default:
-      break;
+  } catch (err) {
+    warnings.push(
+      `Эвристическая конвертация завершилась ошибкой: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return { text, converted: 0, warnings };
   }
 
   if (converted === 0) {
@@ -763,41 +800,120 @@ const HEADING_KEYWORDS = new Set([
   "abstract", "аннотация", "резюме",
 ]);
 
-function classifyHeading(line: string): number | null {
+/**
+ * Classify a line as a heading, considering blank-line context.
+ * @param line - the line text
+ * @param prevLine - line before (empty string if none)
+ * @param nextLine - line after (empty string if none)
+ */
+function classifyHeading(
+  line: string,
+  prevLine: string,
+  nextLine: string,
+): number | null {
   if (!line || line.length > 120 || line.length < 3) return null;
+
+  // Markdown heading: #, ##, ###
   if (/^(#{1,6})\s+/.test(line)) return line.match(/^(#{1,6})/)?.[1].length ?? 1;
+
+  // Numbered section: 1. Title or 1.2. Title
   if (/^\d+\.(\d+\.)*\s+[A-ZА-ЯЁ]/u.test(line)) {
+    // exclude bibliography entries that start with a digit
     if (/^\d+\.\s+[A-ZА-ЯЁ][a-zа-яё]+(,|\s+[A-ZА-ЯЁ]\.)/.test(line)) return null;
     return 2;
   }
+
+  // ALL CAPS heading
   if (/^[A-ZА-ЯЁ][A-ZА-ЯЁ\s-]{4,}$/u.test(line)) return 1;
+
+  // Exclusions: ends with sentence-terminating punctuation
   if (/[.!?,;]$/.test(line)) return null;
+  // Contains a year (likely a bibliography entry)
   if (/\b(19|20)\d{2}\b/.test(line)) return null;
+  // Contains URL
   if (line.includes("http")) return null;
+  // Starts with quote mark
   if (/^[«""]/.test(line)) return null;
+  // Too many commas — likely a bibliography or list item
   if (line.split(",").length >= 3 && line.length > 60) return null;
+  // Doesn't start with a letter
   if (!/^[A-ZА-ЯЁa-zа-яё]/u.test(line)) return null;
+
+  // Known heading keyword — strong signal, ignore blank-line requirement
   if (HEADING_KEYWORDS.has(line.toLowerCase())) return 1;
-  if (line.length <= 70) return 2;
+
+  // Blank-line context: a short line surrounded by empty lines is likely a heading
+  const isIsolated = prevLine.trim() === "" && nextLine.trim() === "";
+  if (isIsolated && line.length <= 80) return 2;
+
+  // Short line with capital start and no trailing punctuation — weak heading signal
+  // Only accept if surrounded by blank lines OR very short
+  if (line.length <= 50 && isIsolated) return 2;
+
   return null;
+}
+
+interface StructureSection {
+  line: number;
+  level: number;
+  text: string;
+  /** Estimated end line (line of next heading - 1, or last line of doc) */
+  endLine: number;
+  /** Semantic kind derived from keyword matching */
+  kind?: string;
+  /** Character offset of line start */
+  charStart?: number;
+  /** Character offset of line end */
+  charEnd?: number;
+}
+
+function classifySectionKind(text: string): string | undefined {
+  const t = text.toLowerCase();
+  if (/введени|introduc/.test(t)) return "Введение";
+  if (/заключени|conclus/.test(t)) return "Заключение";
+  if (/выво/.test(t)) return "Выводы";
+  if (/метод|method/.test(t)) return "Методология";
+  if (/результат|result/.test(t)) return "Результаты";
+  if (/обсужден|discuss/.test(t)) return "Обсуждение";
+  if (/аннотац|abstract|резюм/.test(t)) return "Аннотация";
+  if (/литератур|referenc|bibliograph|sources|works cited/.test(t)) return "Библиография";
+  if (/примечани|сноск|footnote|note/.test(t)) return "Примечания";
+  return undefined;
 }
 
 function buildStructure(text: string) {
   const lines = text.split("\n");
-  const headings: { line: number; level: number; text: string }[] = [];
+  const rawHeadings: { line: number; level: number; text: string; charStart: number }[] = [];
   let paragraphs = 0;
   let bibliographySection: { startLine: number; endLine: number } | undefined;
   let footnotesSection: { startLine: number; endLine: number } | undefined;
   let currentBibStart: number | undefined;
   let currentFootStart: number | undefined;
 
+  // Precompute line char offsets
+  const lineOffsets: number[] = [];
+  let offset = 0;
+  for (const l of lines) {
+    lineOffsets.push(offset);
+    offset += l.length + 1;
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
     paragraphs++;
-    const headingLevel = classifyHeading(line);
+
+    const prevLine = i > 0 ? lines[i - 1] : "";
+    const nextLine = i < lines.length - 1 ? lines[i + 1] : "";
+    const headingLevel = classifyHeading(line, prevLine, nextLine);
+
     if (headingLevel !== null) {
-      headings.push({ line: i + 1, level: headingLevel, text: line.replace(/^#{1,6}\s+/, "") });
+      rawHeadings.push({
+        line: i + 1,
+        level: headingLevel,
+        text: line.replace(/^#{1,6}\s+/, ""),
+        charStart: lineOffsets[i],
+      });
     }
     if (BIBLIOGRAPHY_HEADERS.some((h) => h.toLowerCase() === line.toLowerCase())) currentBibStart = i + 1;
     if (FOOTNOTE_HEADERS.some((h) => h.toLowerCase() === line.toLowerCase()))     currentFootStart = i + 1;
@@ -806,13 +922,31 @@ function buildStructure(text: string) {
   if (currentBibStart)  bibliographySection = { startLine: currentBibStart,  endLine: lines.length };
   if (currentFootStart) footnotesSection    = { startLine: currentFootStart, endLine: currentBibStart ? currentBibStart - 1 : lines.length };
 
+  // Build sections with endLine
+  const sections: StructureSection[] = rawHeadings.map((h, idx) => {
+    const nextHeading = rawHeadings[idx + 1];
+    const endLine = nextHeading ? nextHeading.line - 1 : lines.length;
+    const charEnd = nextHeading
+      ? lineOffsets[nextHeading.line - 2] ?? lineOffsets[lineOffsets.length - 1]
+      : text.length;
+    return {
+      line: h.line,
+      level: h.level,
+      text: h.text,
+      endLine,
+      kind: classifySectionKind(h.text),
+      charStart: h.charStart,
+      charEnd,
+    };
+  });
+
   return {
-    headings,
+    headings: sections,
     paragraphs,
     bibliographySection,
     footnotesSection,
     language: detectLanguage(text),
-    sections: headings,
+    sections,
     footnoteCount: lines.filter((l) => /^\s*\d+[.)]/.test(l)).length,
     bibCount: lines.filter((l) => isBibEntryLine(l.trim())).length,
   };
