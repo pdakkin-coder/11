@@ -381,6 +381,55 @@ export function useAiConvert() {
   return { ...state, convert, reset };
 }
 
+// ── applySelectiveConversion ───────────────────────────────────────────────────────────
+
+export interface SelectiveConversionItem {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/**
+ * Apply targeted replacements to the original document while preserving all
+ * untouched text verbatim.
+ *
+ * Strategy:
+ *  - Replacements are sorted end→start so that earlier char offsets are not
+ *    invalidated by mutations further in the string.
+ *  - Each replacement is validated (finite numbers, non-zero range, within text
+ *    bounds, non-empty string) before being applied.
+ *  - Overlapping replacements are skipped (nextEnd guard).
+ */
+export function applySelectiveConversion(
+  originalText: string,
+  replacements: SelectiveConversionItem[],
+): string {
+  if (!originalText || replacements.length === 0) return originalText;
+
+  const valid = replacements
+    .filter(
+      (item) =>
+        Number.isFinite(item.start) &&
+        Number.isFinite(item.end) &&
+        item.start >= 0 &&
+        item.end > item.start &&
+        item.end <= originalText.length &&
+        typeof item.text === "string",
+    )
+    .sort((a, b) => b.start - a.start); // end → start order
+
+  let nextEnd = originalText.length;
+  let out = originalText;
+
+  for (const item of valid) {
+    if (item.end > nextEnd) continue; // skip overlapping
+    out = out.slice(0, item.start) + item.text + out.slice(item.end);
+    nextEnd = item.start;
+  }
+
+  return out;
+}
+
 // ── mergeFoundItems ────────────────────────────────────────────────────────────────────
 
 /**
