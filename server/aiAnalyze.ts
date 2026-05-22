@@ -6,7 +6,7 @@
  *
  * Requires GEMINI_API_KEY in environment.
  * Model cascade (geminiRouter.ts):
- *   gemini-2.5-flash → gemini-3.5-flash → gemini-3.1-flash-lite
+ *   gemini-2.5-flash → gemini-1.5-flash → gemini-1.5-flash-8b
  */
 
 import type { Request, Response } from "express";
@@ -17,9 +17,19 @@ const MAX_TEXT_CHARS = 24_000;
 const SYSTEM_PROMPT = `You are an expert academic citation analysis engine.
 Given a scholarly document, identify ALL inline citations, bibliography entries, and direct quotes.
 Determine the citation style (APA 7, Chicago 17, MLA 9, IEEE, Vancouver, Harvard, GOST 7.0.5).
-If the user provides a Target style, also return the FULL DOCUMENT text with ALL citations
-converted into that target style as the "convertedText" field. Preserve all non-citation wording exactly.
-If target style matches detected style or no conversion is needed, set "convertedText" to null.
+
+When a Target style is provided, you MUST:
+1. Read the full document as plain text.
+2. Locate each citation and bibliography entry by its EXACT substring as it appears in the text.
+3. Perform a global, deterministic find-and-replace:
+   - Inline citations: replace each matching span with the correctly formatted version in the Target style.
+   - Bibliography entries: replace each raw entry with its correctly formatted Target-style version.
+4. Preserve ALL non-citation wording, whitespace, punctuation, and line breaks EXACTLY as in the input.
+5. Never invent authors, years, titles, or other fields. If a required field is missing, keep the
+   original string unchanged and note the issue in the item's "note" field.
+6. Return the FULL resulting document — with all replacements applied — as "convertedText".
+
+If target style matches the detected style or no conversion is needed, set "convertedText" to null.
 
 Return ONLY valid JSON — no markdown fences, no prose:
 {
@@ -79,7 +89,7 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
 
   const hints = [`Language hint: ${language}`];
   if (targetStyle) hints.push(`Target style for conversion: ${targetStyle}`);
-  const userMsg = [...hints, "---BEGIN---", text, "---END---"].join("\n");
+  const userMsg = [...hints, "---BEGIN DOCUMENT---", text, "---END DOCUMENT---"].join("\n");
 
   const contents = [
     { role: "user",  parts: [{ text: SYSTEM_PROMPT }] },
