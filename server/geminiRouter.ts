@@ -1,104 +1,136 @@
-/**
- * geminiRouter.ts — single Gemini API call, no cascade
- *
- * Makes one request to gemini-2.5-flash.
- * Returns the raw text from the model response.
- * Throws a typed GeminiError on any failure.
- */
+import type { Request, Response } from "express";
 
-export const MODEL = "gemini-2.5-flash";
-const API_VERSION  = "v1beta";
-const TIMEOUT_MS   = 60_000; // 60s — generous for large documents
+const MODEL = "gemini-2.5-flash";
+const URL   = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
-export class GeminiError extends Error {
-  constructor(
-    message: string,
-    public readonly httpStatus: number,
-    public readonly retryAfterMs?: number,
-  ) {
-    super(message);
-    this.name = "GeminiError";
+const SYSTEM_PROMPT = `You are an expert academic citation analysis engine.
+Given a scholarly document, identify ALL inline citations, bibliography entries, and direct quotes.
+Determine the citation style (APA 7, Chicago 17, MLA 9, IEEE, Vancouver, Harvard, GOST 7.0.5).
+
+When a Target style is provided:
+- Replace each inline citation and bibliography entry with the correctly formatted Target-style version.
+- Preserve ALL non-citation text, whitespace, punctuation, and line breaks EXACTLY.
+- Return the full converted document as "convertedText".
+- If no conversion needed, set "convertedText" to null.
+
+Return ONLY valid JSON, no markdown fences:
+{
+  "detectedStyle": "APA"|"Chicago"|"MLA"|"IEEE"|"Vancouver"|"Harvard"|"GOST"|"Unknown",
+  "confidence": 0.0-1.0,
+  "language": "ru"|"en"|"mixed",
+  "summary": "one-sentence description",
+  "convertedText": "full converted document or null",
+  "items": [{
+    "id": "ai-0",
+    "type": "inline-apa"|"inline-numeric"|"footnote"|"bibliography"|"ibid"|"quote",
+    "text": "exact span",
+    "line": 1,
+    "start": 0,
+    "end": 10,
+    "confidence": 0.9,
+    "note": "optional"
+  }],
+  "bibEntries": [{
+    "raw": "original entry",
+    "style": "APA",
+    "converted": "reformatted entry or null",
+    "fields": {"author":"","year":"","title":"","source":"","publisher":"","place":"","pages":"","doi":"","url":""},
+    "startLine": 1
+  }]
+}`;
+
+function buildPrompt(text: string, language: string, targetStyle?: string): string {
+  const lines = [
+    `Language: ${language}`,
+    targetStyle ? `Convert citations to: ${targetStyle}` : null,
+    "---BEGIN DOCUMENT---",
+    text,
+    "---END DOCUMENT---",
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+export async function handleAiAnalyze(req: Request, res: Response): Promise<void> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    res.status(501).json({ error: "GEMINI_API_KEY not set" });
+    return;
   }
-}
 
-function parseRetryAfter(body: string): number | undefined {
-  // Gemini 429 body contains "Please retry in 54.41s"
-  const match = body.match(/retry in ([\d.]+)s/i);
-  return match ? Math.ceil(parseFloat(match[1])) * 1000 : undefined;
-}
+  const rawText     = typeof req.body?.text        === "string" ? req.body.text        : "";
+  const targetStyle = typeof req.body?.targetStyle === "string" ? req.body.targetStyle : undefined;
+  const language    = typeof req.body?.language    === "string" ? req.body.language    : "mixed";
 
-export async function callGemini(
-  contents: object[],
-  generationConfig: object,
-  apiKey: string,
-  systemInstruction?: object,
-): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/${API_VERSION}/models/${MODEL}:generateContent?key=${apiKey}`;
+  if (!rawText.trim()) {
+    res.status(400).json({ error: "Текст не передан" });
+    return;
+  }
 
-  const body: Record<string, unknown> = { contents, generationConfig };
-  if (systemInstruction) body.systemInstruction = systemInstruction;
+  // Trim oversized documents
+  const text = rawText.length > 24_000
+    ? rawText.slice(0, 16_800) + "\n[...]\n" + rawText.slice(-7_200)
+    : rawText;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const prompt = buildPrompt(text, language, targetStyle);
 
-  let res: Response;
+  // --- Send request to Gemini ---
+  const geminiRes = await fetch(`${URL}?key=${apiKey}`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0 },
+    }),
+  });
+
+  // --- Read raw response ---
+  const geminiBody = await geminiRes.text();
+
+  if (!geminiRes.ok) {
+    console.error(`[gemini] ${geminiRes.status}:`, geminiBody.slice(0, 300));
+    res.status(geminiRes.status).json({ error: geminiBody });
+    return;
+  }
+
+  // --- Extract model text ---
+  let modelText: string;
   try {
-    res = await fetch(url, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify(body),
-      signal:  controller.signal,
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    const e = err as Error;
-    if (e.name === "AbortError") {
-      throw new GeminiError(
-        "Gemini не ответил за 60 секунд. Попробуйте с более коротким документом.",
-        504,
-      );
-    }
-    throw new GeminiError(
-      `Не удалось подключиться к Gemini API: ${e.message}`,
-      502,
-    );
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (res.ok) {
-    const json = (await res.json()) as {
+    const geminiJson = JSON.parse(geminiBody) as {
       candidates?: { content?: { parts?: { text?: string }[] } }[];
     };
-    const raw = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-    return raw
-      .replace(/^\s*```(?:json)?\s*/i, "")
-      .replace(/\s*```\s*$/i, "")
-      .trim();
+    modelText = geminiJson.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  } catch {
+    res.status(502).json({ error: "Не удалось распарсить ответ Gemini" });
+    return;
   }
 
-  const errBody = await res.text();
-  console.error(`[gemini] HTTP ${res.status}:`, errBody.slice(0, 400));
+  // Strip possible markdown fences
+  const clean = modelText
+    .replace(/^\s*```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
 
-  if (res.status === 429) {
-    const retryAfterMs = parseRetryAfter(errBody);
-    const seconds = retryAfterMs ? Math.ceil(retryAfterMs / 1000) : 60;
-    throw new GeminiError(
-      `Лимит запросов Gemini исчерпан. Повторите через ${seconds} секунд.`,
-      429,
-      retryAfterMs,
-    );
+  // --- Parse JSON from model ---
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(clean) as Record<string, unknown>;
+  } catch {
+    console.error("[gemini] model returned non-JSON:", clean.slice(0, 200));
+    res.status(502).json({ error: "Модель вернула не JSON. Попробуйте ещё раз." });
+    return;
   }
 
-  if (res.status === 503) {
-    throw new GeminiError(
-      "Gemini API временно перегружен. Повторите через несколько секунд.",
-      503,
-    );
-  }
-
-  throw new GeminiError(
-    `Gemini API ошибка ${res.status}. Повторите запрос.`,
-    res.status >= 500 ? 502 : 400,
-  );
+  // --- Send structured response to client ---
+  res.json({
+    items:         Array.isArray(parsed.items)      ? parsed.items      : [],
+    bibEntries:    Array.isArray(parsed.bibEntries) ? parsed.bibEntries : [],
+    detectedStyle: typeof parsed.detectedStyle === "string" ? parsed.detectedStyle : "Unknown",
+    confidence:    typeof parsed.confidence    === "number" ? parsed.confidence    : 0,
+    language:      typeof parsed.language      === "string" ? parsed.language      : language,
+    summary:       typeof parsed.summary       === "string" ? parsed.summary       : "",
+    convertedText: typeof parsed.convertedText === "string" ? parsed.convertedText : null,
+    _model:        MODEL,
+    _label:        "Gemini 2.5 Flash",
+  });
 }
