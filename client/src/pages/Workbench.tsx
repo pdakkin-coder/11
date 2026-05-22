@@ -107,9 +107,21 @@ const CONVERT_SCOPE_OPTIONS: { id: string; label: string; description: string }[
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Section entry — normalised shape used in Structure panel
+// ─────────────────────────────────────────────────────────────────────────────
+interface SectionEntry {
+  /** Display heading text */
+  heading: string;
+  /** Outline level (1 = top-level) */
+  level: number;
+  /** 1-based line number in the document */
+  startLine: number;
+  /** Origin: heuristic analyzeStructure or AI response */
+  source: "heuristic" | "ai";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Annotation segmenter
-// Splits `text` into plain and annotated segments so the read-only viewer can
-// render <span class="ann-*"> for every FoundItem / EditorIssue.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type AnnotationKind = "citation" | "issue";
@@ -119,24 +131,17 @@ interface AnnotationSegment {
   text: string;
   start: number;
   end: number;
-  // only when kind === "annotation"
   annClass?: string;
-  itemId?: string;      // FoundItem.id  or  "issue-" + EditorIssue.id
+  itemId?: string;
   itemType?: string;
   annKind?: AnnotationKind;
 }
 
-/**
- * Build a flat list of plain/annotation segments from the document text.
- * Overlapping ranges are resolved by first-wins priority (citations > issues).
- * Ranges that end beyond the text boundary are clamped.
- */
 function buildAnnotationSegments(
   text: string,
   found: FoundItem[],
   issues: EditorIssue[],
 ): AnnotationSegment[] {
-  // Collect all candidate ranges, citations have higher priority (lower number)
   type RangeEntry = {
     start: number; end: number;
     annClass: string; itemId: string; itemType: string; annKind: AnnotationKind;
@@ -161,7 +166,6 @@ function buildAnnotationSegments(
     })),
   ].filter((r) => r.start < r.end && r.start < text.length);
 
-  // Sort by start asc, then by kind (citation first)
   ranges.sort((a, b) =>
     a.start !== b.start
       ? a.start - b.start
@@ -172,9 +176,8 @@ function buildAnnotationSegments(
   let cursor = 0;
 
   for (const r of ranges) {
-    if (r.start < cursor) continue; // skip overlapping / already covered
+    if (r.start < cursor) continue;
     if (r.start > cursor) {
-      // plain gap before this annotation
       segments.push({ kind: "plain", text: text.slice(cursor, r.start), start: cursor, end: r.start });
     }
     segments.push({
@@ -190,7 +193,6 @@ function buildAnnotationSegments(
     cursor = r.end;
   }
 
-  // trailing plain text
   if (cursor < text.length) {
     segments.push({ kind: "plain", text: text.slice(cursor), start: cursor, end: text.length });
   }
@@ -266,6 +268,8 @@ export default function Workbench() {
   const [aiTargetStyle, setAiTargetStyle] = useState<CitationStyle | null>(null);
   const [convertScope, setConvertScope] = useState<string[]>(["citations", "bibliography"]);
   const [convertTargetStyle, setConvertTargetStyle] = useState<CitationStyle>("APA");
+  // AI-enriched sections — merged with heuristic after successful AI analysis
+  const [aiSections, setAiSections] = useState<SectionEntry[] | null>(null);
 
   // AI hooks
   const {
@@ -298,7 +302,6 @@ export default function Workbench() {
   const [editMode, setEditMode]         = useState(false);
   const [draft, setDraft]               = useState<string>(SAMPLE_DOC);
 
-  // Refs for scrolling to annotations from panel clicks
   const spanRefs = useRef<Map<string, HTMLSpanElement>>(new Map());
 
   const sidebar    = useDragResize(224, 160, 320, "right");
@@ -320,6 +323,40 @@ export default function Workbench() {
     lines:            text.split("\n").length,
     readingMinutes:   Math.max(1, Math.round(countWords(text) / 180)),
   }), [text, structure.paragraphs]);
+
+  // ── Normalised sections for the Structure panel ───────────────────────────
+  // Priority: aiSections (if available) merged on top of heuristic sections.
+  // Heuristic sections keep source="heuristic"; AI-only additions get source="ai".
+  const displaySections = useMemo((): SectionEntry[] => {
+    // Map heuristic headings to SectionEntry
+    const heuristicSections: SectionEntry[] = structure.sections.map((h) => ({
+      heading:   h.text,          // fix: the field is .text, not .heading
+      level:     h.level,
+      startLine: h.line,
+      source:    "heuristic" as const,
+    }));
+
+    if (!aiSections || aiSections.length === 0) return heuristicSections;
+
+    // Merge: keep heuristic sections, overlay AI sections by startLine
+    const hLines = new Set(heuristicSections.map((s) => s.startLine));
+    const merged: SectionEntry[] = [...heuristicSections];
+
+    for (const aiSec of aiSections) {
+      if (!hLines.has(aiSec.startLine)) {
+        // AI found a section the heuristic missed
+        merged.push({ ...aiSec, source: "ai" });
+      } else {
+        // AI confirms heuristic section — upgrade heading text if AI provides richer label
+        const idx = merged.findIndex((s) => s.startLine === aiSec.startLine);
+        if (idx !== -1 && aiSec.heading && aiSec.heading.length > merged[idx].heading.length) {
+          merged[idx] = { ...merged[idx], heading: aiSec.heading, source: "ai" };
+        }
+      }
+    }
+
+    return merged.sort((a, b) => a.startLine - b.startLine);
+  }, [structure.sections, aiSections]);
 
   // Segments for the annotated read-only viewer
   const currentText = preview?.text ?? text;
@@ -347,7 +384,7 @@ export default function Workbench() {
     if (!text.trim()) return;
 
     const pack = typeof buildEvidencePack === "function"
-      ? buildEvidencePack(text, heuristicFound, structure)
+      ? buildEvidencePack(text, heuristicFound)
       : null;
 
     const req: AiAnalyzeRequest = pack
@@ -359,7 +396,7 @@ export default function Workbench() {
             bibCount:      heuristicFound.filter((f) => f.type === "bibliography").length,
             language:      structure.language as "ru" | "en" | "mixed",
           },
-          evidence:               pack.evidence,
+          evidence:               pack.evidenceSnippets,
           bibliographyCandidates: pack.bibliographyCandidates,
           structureCandidates:    pack.structureCandidates,
           scope: ["analyze"],
@@ -370,6 +407,25 @@ export default function Workbench() {
     if (!result) return;
 
     if (result.items?.length) setAiFound(result.items as FoundItem[]);
+
+    // ── Extract AI sections from result and store them ────────────────────
+    // AI response may contain sections[] or structureSections[] arrays.
+    // Both shapes are normalised here into SectionEntry[].
+    const rawSections: unknown =
+      (result as Record<string, unknown>).sections ??
+      (result as Record<string, unknown>).structureSections ?? null;
+
+    if (Array.isArray(rawSections) && rawSections.length > 0) {
+      const normalised: SectionEntry[] = (rawSections as Record<string, unknown>[]).map((s) => ({
+        heading:   String(s.heading ?? s.title ?? s.text ?? ""),
+        level:     typeof s.level === "number" ? s.level : 1,
+        startLine: typeof s.startLine === "number" ? s.startLine
+                 : typeof s.line      === "number" ? s.line : 0,
+        source:    "ai" as const,
+      })).filter((s) => s.heading.length > 0);
+
+      if (normalised.length > 0) setAiSections(normalised);
+    }
 
     if (result.error) {
       const msg = result.error;
@@ -390,6 +446,9 @@ export default function Workbench() {
           ? ` (уверенность ${Math.round(result.confidence * 100)}%)`
           : "") + ".",
     });
+
+    // Auto-switch to structure panel so user sees the result immediately
+    setPanel("structure");
   }
 
   // ── AI: conversion via useAiConvert ──────────────────────────────────────
@@ -397,7 +456,7 @@ export default function Workbench() {
     if (!text.trim() || convertScope.length === 0) return;
 
     const pack = typeof buildEvidencePack === "function"
-      ? buildEvidencePack(text, heuristicFound, structure)
+      ? buildEvidencePack(text, heuristicFound)
       : null;
 
     const baseReq = pack
@@ -409,7 +468,7 @@ export default function Workbench() {
             bibCount:      heuristicFound.filter((f) => f.type === "bibliography").length,
             language:      structure.language as "ru" | "en" | "mixed",
           },
-          evidence:               pack.evidence,
+          evidence:               pack.evidenceSnippets,
           bibliographyCandidates: pack.bibliographyCandidates,
           structureCandidates:    pack.structureCandidates,
         }
@@ -471,7 +530,7 @@ export default function Workbench() {
     setText(imported.text);
     setDraft(imported.text);
     setWarnings(imported.warnings);
-    setPreview(null); setSelected(null); setAiFound(null); setAiTargetStyle(null);
+    setPreview(null); setSelected(null); setAiFound(null); setAiTargetStyle(null); setAiSections(null);
     if (imported.warnings.length > 0) {
       toast({ title: "Файл загружен с предупреждениями", description: imported.warnings[0] });
     }
@@ -491,7 +550,7 @@ export default function Workbench() {
       setText(data.text ?? "");
       setDraft(data.text ?? "");
       setWarnings(data.warnings ?? []);
-      setPreview(null); setSelected(null); setLinkDialogOpen(false); setLinkUrl(""); setAiFound(null); setAiTargetStyle(null);
+      setPreview(null); setSelected(null); setLinkDialogOpen(false); setLinkUrl(""); setAiFound(null); setAiTargetStyle(null); setAiSections(null);
       if (data.warnings?.length) {
         toast({ title: "Импорт завершён с предупреждениями", description: data.warnings[0] });
       }
@@ -535,7 +594,7 @@ export default function Workbench() {
     const doc = DEMO_DOCS.find((d) => d.id === id);
     if (!doc) return;
     setText(doc.text); setDraft(doc.text); setDocName(doc.label + ".txt");
-    setPreview(null); setSelected(null); setSearch(""); setTypeFilter("all"); setWarnings([]); setAiFound(null); setAiTargetStyle(null);
+    setPreview(null); setSelected(null); setSearch(""); setTypeFilter("all"); setWarnings([]); setAiFound(null); setAiTargetStyle(null); setAiSections(null);
     spanRefs.current.clear();
   }
 
@@ -552,17 +611,14 @@ export default function Workbench() {
     );
   }
 
-  // ── Panel card click: select + scroll into view ───────────────────────────
   function handlePanelItemClick(itemId: string, start: number, end: number) {
     setSelected({ start, end });
     scrollToItem(itemId);
   }
 
-  // ── Annotation span click in editor ──────────────────────────────────────
   function handleSpanClick(seg: AnnotationSegment) {
     if (!seg.itemId) return;
     setSelected({ start: seg.start, end: seg.end });
-    // If it's a citation, switch to citations panel; if issue → editor panel
     if (seg.annKind === "citation") setPanel("citations");
     if (seg.annKind === "issue")    setPanel("editor");
   }
@@ -672,6 +728,9 @@ export default function Workbench() {
                 AI‑анализ активен: {aiData!.items.length} эл. — {aiData!.detectedStyle}
                 {" "}({Math.round((aiData!.confidence ?? 0) * 100)}%)
               </span>
+              {aiSections && aiSections.length > 0 && (
+                <span className="text-muted-foreground"> · {aiSections.length} разд. из AI</span>
+              )}
               {aiTargetStyle && (
                 <span> · конвертация в <strong>{aiTargetStyle}</strong> применена.</span>
               )}
@@ -768,6 +827,9 @@ export default function Workbench() {
               >
                 <Icon className="h-4 w-4 shrink-0" />
                 <span className="truncate">{label}</span>
+                {key === "structure" && displaySections.length > 0 && (
+                  <Badge variant="secondary" className="ml-auto text-[10px] px-1.5 shrink-0">{displaySections.length}</Badge>
+                )}
                 {key === "citations" && found.length > 0 && (
                   <Badge variant="secondary" className="ml-auto text-[10px] px-1.5 shrink-0">{found.length}</Badge>
                 )}
@@ -802,7 +864,6 @@ export default function Workbench() {
         {/* ── Document area ─────────────────────────────────────────────────── */}
         <main className="flex-1 flex flex-col min-w-0 relative">
 
-          {/* Edit-mode toolbar */}
           {editMode && (
             <div className="h-9 border-b flex items-center gap-1 px-3 bg-muted/20 shrink-0">
               <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("bold")}><Bold className="h-3.5 w-3.5" /></Button>
@@ -821,7 +882,6 @@ export default function Workbench() {
             </div>
           )}
 
-          {/* Conversion preview banner */}
           {preview && (
             <div className="h-9 border-b flex items-center gap-3 px-4 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 text-sm shrink-0">
               <RefreshCw className="h-4 w-4" />
@@ -836,7 +896,6 @@ export default function Workbench() {
           )}
 
           <ScrollArea className="flex-1">
-            {/* ── READ-ONLY: annotated render ── */}
             {!editMode && (
               <div
                 className={`p-6 min-h-full font-mono text-sm leading-relaxed whitespace-pre-wrap select-text ${
@@ -848,7 +907,6 @@ export default function Workbench() {
                   if (seg.kind === "plain") {
                     return <span key={idx}>{seg.text}</span>;
                   }
-                  // Annotation span
                   const itemId = seg.itemId!;
                   const isHovered  = hoveredId === itemId;
                   const isSelected = selected !== null && selected.start === seg.start && selected.end === seg.end;
@@ -884,7 +942,6 @@ export default function Workbench() {
               </div>
             )}
 
-            {/* ── EDIT MODE: plain contenteditable (caret-safe) ── */}
             {editMode && (
               <div
                 className="p-6 min-h-full font-mono text-sm leading-relaxed outline-none whitespace-pre-wrap cursor-text"
@@ -930,8 +987,10 @@ export default function Workbench() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <h2 className="text-sm font-semibold">Структура документа</h2>
-                    <Badge variant="outline" className="text-[10px]">{structure.sections.length} разд.</Badge>
+                    <Badge variant="outline" className="text-[10px]">{displaySections.length} разд.</Badge>
                   </div>
+
+                  {/* Language + paragraph stats */}
                   <div className="flex gap-2">
                     <Badge variant="secondary" className="text-[10px] gap-1">
                       <Type className="h-3 w-3" />{structure.language === "ru" ? "RU" : structure.language === "en" ? "EN" : "RU+EN"}
@@ -939,27 +998,89 @@ export default function Workbench() {
                     <Badge variant="secondary" className="text-[10px] gap-1">
                       <AlignLeft className="h-3 w-3" />{structure.paragraphs} абз.
                     </Badge>
+                    {aiSections && aiSections.length > 0 && (
+                      <Badge variant="secondary" className="text-[10px] gap-1 text-primary border-primary/30">
+                        <Sparkles className="h-3 w-3" />AI
+                      </Badge>
+                    )}
                   </div>
-                  {structure.sections.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">Разделы не обнаружены.</p>
+
+                  {/* Section list */}
+                  {displaySections.length === 0 ? (
+                    <div className="space-y-2 pt-1">
+                      <p className="text-xs text-muted-foreground">
+                        Явные заголовки не обнаружены — документ может быть сплошным текстом.
+                      </p>
+                      {!aiData && (
+                        <p className="text-[11px] text-muted-foreground">
+                          Запустите <span className="font-medium text-foreground">AI-анализ</span> для уточнённого распознавания разделов.
+                        </p>
+                      )}
+                    </div>
                   ) : (
-                    <div className="space-y-1">
-                      {structure.sections.map((sec, i) => (
+                    <div className="space-y-0.5">
+                      {displaySections.map((sec, i) => (
                         <div
                           key={i}
-                          className="flex items-start gap-2 p-2 rounded-md hover:bg-muted/50 cursor-pointer transition-colors"
-                          style={{ paddingLeft: `${(sec.level ?? 1) * 0.5 + 0.5}rem` }}
+                          className="flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 cursor-default transition-colors group"
+                          style={{ paddingLeft: `${(sec.level - 1) * 12 + 8}px` }}
+                          title={`Строка ${sec.startLine}${sec.source === "ai" ? " · AI" : ""}`}
                         >
-                          <span className="text-[10px] text-muted-foreground mt-0.5 shrink-0 w-4 text-right">{sec.level ?? 1}</span>
-                          <span className="text-xs leading-snug break-words min-w-0 flex-1">{sec.heading}</span>
-                          <span className="text-[10px] text-muted-foreground shrink-0 ml-auto">{sec.startLine}</span>
+                          {/* Level indicator */}
+                          <span
+                            className="text-[10px] text-muted-foreground mt-0.5 shrink-0 w-3 text-right select-none"
+                            aria-label={`Уровень ${sec.level}`}
+                          >
+                            {sec.level}
+                          </span>
+
+                          {/* Heading text */}
+                          <span className="text-xs leading-snug break-words min-w-0 flex-1 text-foreground">
+                            {sec.heading}
+                          </span>
+
+                          {/* Right-side metadata */}
+                          <div className="flex items-center gap-1 shrink-0 ml-1">
+                            {sec.source === "ai" && (
+                              <Badge
+                                variant="outline"
+                                className="text-[9px] px-1 py-0 h-3.5 text-primary border-primary/30"
+                                title="Обнаружен AI-анализом"
+                              >
+                                AI
+                              </Badge>
+                            )}
+                            <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">
+                              {sec.startLine}
+                            </span>
+                          </div>
                         </div>
                       ))}
                     </div>
                   )}
-                  {!aiData && (
+
+                  {/* Bib / footnotes summary */}
+                  {(structure.bibCount > 0 || structure.footnoteCount > 0) && (
+                    <div className="pt-1 border-t space-y-0.5">
+                      {structure.bibCount > 0 && (
+                        <p className="text-[11px] text-muted-foreground flex gap-1.5 items-center">
+                          <span className="legend-dot-bib w-2 h-2 rounded-full shrink-0" />
+                          Библиографических записей: <span className="font-medium text-foreground">{structure.bibCount}</span>
+                        </p>
+                      )}
+                      {structure.footnoteCount > 0 && (
+                        <p className="text-[11px] text-muted-foreground flex gap-1.5 items-center">
+                          <span className="legend-dot-footnote w-2 h-2 rounded-full shrink-0" />
+                          Строк сносок: <span className="font-medium text-foreground">{structure.footnoteCount}</span>
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Prompt to run AI analysis if not done yet */}
+                  {!aiData && displaySections.length > 0 && (
                     <p className="text-[11px] text-muted-foreground pt-1">
-                      Запустите <span className="font-medium">AI-анализ</span> для уточнённого распознавания разделов.
+                      Запустите <span className="font-medium text-foreground">AI-анализ</span> для уточнённого распознавания разделов.
                     </p>
                   )}
                 </div>
