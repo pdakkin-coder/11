@@ -1,21 +1,53 @@
 /**
  * useAiAnalyze — React hook for POST /api/ai-analyze
  *
- * Sends document text to the AI endpoint and returns enriched citation data.
+ * Evidence-Pack Pipeline:
+ *   analyze.ts → buildEvidencePack() → sendEvidencePack() → POST /api/ai-analyze
+ *
+ * AI receives a compact JSON packet instead of the full document text.
+ * Token cost is reduced 5-10x for an average document (30 KB → 3-5 KB JSON).
+ *
  * Exposes activeModel so the UI can show which Gemini model responded.
  * If the endpoint is unavailable (501/502) the caller should fall back to
  * the heuristic-only path.
  */
 
 import { useState, useCallback, useRef } from "react";
-import type { FoundItem, CitationStyle } from "./analyze";
+import type {
+  FoundItem,
+  CitationStyle,
+  EvidenceSnippet,
+  StructureCandidate,
+  EvidenceSource,
+} from "./analyze";
 
 const CLIENT_TIMEOUT_MS = 100_000;
 
+// ── Request / Response types ────────────────────────────────────────────────
+
 export interface AiAnalyzeRequest {
-  text: string;
+  heuristicSummary: {
+    style: CitationStyle;
+    confidence: number;
+    citationCount: number;
+    bibCount: number;
+    language: "ru" | "en" | "mixed";
+  };
+  evidence: EvidenceSnippet[];
+  bibliographyCandidates: FoundItem[];
+  structureCandidates: StructureCandidate[];
+  /** Optional: user-selected fragment for focused analysis/conversion */
+  selectedFragment?: {
+    text: string;
+    charStart: number;
+    charEnd: number;
+  };
+  scope: ("analyze" | "convert" | "validate")[];
   targetStyle?: CitationStyle;
-  language?: "ru" | "en" | "mixed";
+}
+
+export interface AiConvertRequest extends AiAnalyzeRequest {
+  scope: ("analyze" | "convert" | "validate")[];
 }
 
 export interface AiBibEntry {
@@ -60,7 +92,7 @@ export interface AiAnalyzeState {
   data:        AiAnalyzeResponse | null;
   loading:     boolean;
   error:       string | null;
-  activeModel: string | null;   // label of the model that last responded
+  activeModel: string | null;
 }
 
 /** Humanise raw error strings coming from the server or browser */
@@ -75,7 +107,7 @@ function humaniseError(raw: string): string {
     return "Нет соединения с сервером. Проверьте, что сервер запущен на порту 5000.";
 
   if (raw.includes("Квота исчерпана") || raw.includes("полночь") || raw.includes("aistudio.google.com"))
-    return raw; // already friendly from router
+    return raw;
 
   if (raw.includes("429"))
     return "Достигнут лимит запросов к Gemini. Подождите минуту и повторите.";
@@ -98,7 +130,7 @@ export function useAiAnalyze() {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
     const ctrl = new AbortController();
-    abortRef.current  = ctrl;
+    abortRef.current   = ctrl;
     timeoutRef.current = setTimeout(() => ctrl.abort(), CLIENT_TIMEOUT_MS);
 
     setState({ data: null, loading: true, error: null, activeModel: null });
@@ -124,7 +156,7 @@ export function useAiAnalyze() {
         const msg = humaniseError(rawMsg);
         const errorResponse: AiAnalyzeResponse = {
           items: [], bibEntries: [], detectedStyle: "Unknown",
-          confidence: 0, language: req.language ?? "mixed",
+          confidence: 0, language: req.heuristicSummary.language,
           summary: "", convertedText: null, error: msg,
         };
         setState({ data: errorResponse, loading: false, error: msg, activeModel: null });
@@ -146,7 +178,7 @@ export function useAiAnalyze() {
 
       const errorResponse: AiAnalyzeResponse = {
         items: [], bibEntries: [], detectedStyle: "Unknown",
-        confidence: 0, language: req.language ?? "mixed",
+        confidence: 0, language: req.heuristicSummary.language,
         summary: "", convertedText: null, error: msg,
       };
       setState({ data: errorResponse, loading: false, error: msg, activeModel: null });
@@ -165,13 +197,36 @@ export function useAiAnalyze() {
 
 /**
  * Merge heuristic FoundItems with AI FoundItems.
- * AI results take priority at the same text offset.
+ * Strategy:
+ *  - Heuristic items are the base layer (source: "heuristic").
+ *  - AI items at the same offset override type/confidence (source: "merged").
+ *  - AI-only items are appended (source: "ai").
+ * Result is sorted by start offset.
  */
-export function mergeFoundItems(heuristic: FoundItem[], ai: FoundItem[]): FoundItem[] {
-  const result = [...ai];
+export function mergeFoundItems(
+  heuristic: FoundItem[],
+  ai: FoundItem[],
+): FoundItem[] {
+  const merged = new Map<string, FoundItem>();
+
   for (const h of heuristic) {
-    const dup = ai.some((a) => Math.abs(a.start - h.start) < 10 && a.type === h.type);
-    if (!dup) result.push(h);
+    merged.set(`${h.start}:${h.end}`, { ...h, source: "heuristic" as EvidenceSource });
   }
-  return result.sort((a, b) => a.start - b.start);
+
+  for (const a of ai) {
+    const key = `${a.start}:${a.end}`;
+    const existing = merged.get(key);
+    if (existing) {
+      merged.set(key, {
+        ...existing,
+        type: (a.confidence ?? 0) > (existing.confidence ?? 0) ? a.type : existing.type,
+        confidence: Math.max(a.confidence ?? 0, existing.confidence ?? 0),
+        source: "merged" as EvidenceSource,
+      });
+    } else {
+      merged.set(key, { ...a, source: "ai" as EvidenceSource });
+    }
+  }
+
+  return [...merged.values()].sort((a, b) => a.start - b.start);
 }
