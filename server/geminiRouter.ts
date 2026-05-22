@@ -6,8 +6,7 @@
  *   2. gemini-3.5-flash      —  5 RPM,  20 RPD  (fallback-1)
  *   3. gemini-3.1-flash-lite — 15 RPM, 500 RPD  (fallback-2)
  *
- * On 429 or 503: immediately advance to next model.
- * On AbortError / network (status===undefined): retry once after 1s, then advance.
+ * On any error (429, 503, timeout, network): advance to next model.
  * All models exhausted: throw with UTC-midnight RPD reset hint.
  */
 
@@ -77,69 +76,39 @@ async function callGeminiModel(
   throw err;
 }
 
-async function tryModel(
-  contents: object[],
-  generationConfig: object,
-  apiKey: string,
-  model: GeminiModel,
-  systemInstruction?: object,
-): Promise<string> {
-  for (let attempt = 0; attempt <= 1; attempt++) {
-    try {
-      return await callGeminiModel(contents, generationConfig, apiKey, model, systemInstruction);
-    } catch (err) {
-      const e = err as Error & { status?: number; name?: string };
-
-      // 429 / 503 — advance cascade immediately
-      if (e.status === 429 || e.status === 503) throw e;
-
-      // Network blip or AbortError (timeout) — one retry
-      const isNetworkBlip = e.status === undefined;
-      if (isNetworkBlip && attempt === 0) {
-        console.warn(`[gemini-router] ${model} network/timeout blip, retrying once…`);
-        await new Promise((r) => setTimeout(r, 1_000));
-        continue;
-      }
-
-      // Second failure or non-retriable error
-      throw e;
-    }
-  }
-  throw new Error(`Gemini [${model}]: все попытки исчерпаны`);
-}
-
 export interface GeminiResult {
   raw: string;
   model: GeminiModel;
 }
 
+/**
+ * Main cascade: walk MODELS[], advance on ANY error.
+ */
 export async function callGemini(
   contents: object[],
   generationConfig: object,
   apiKey: string,
   systemInstruction?: object,
 ): Promise<GeminiResult> {
+  let lastError: unknown;
+
   for (const model of MODELS) {
     try {
-      const raw = await tryModel(contents, generationConfig, apiKey, model, systemInstruction);
+      const raw = await callGeminiModel(contents, generationConfig, apiKey, model, systemInstruction);
       console.info(`[gemini-router] success with ${model}`);
       return { raw, model };
     } catch (err) {
       const e = err as Error & { status?: number };
-      if (e.status === 429) {
-        console.warn(`[gemini-router] ${model} quota exceeded (429), trying next model`);
-        continue;
-      }
-      if (e.status === 503) {
-        console.warn(`[gemini-router] ${model} overloaded (503), trying next model`);
-        continue;
-      }
-      throw e;
+      lastError = err;
+      console.warn(`[gemini-router] ${model} failed (${e.status ?? "network"}), trying next model…`);
+      continue;
     }
   }
 
+  const lastMsg = lastError instanceof Error ? lastError.message : String(lastError);
   throw new Error(
     `Все модели Gemini недоступны (${MODELS.join(" → ")}). ` +
+    `Последняя ошибка: ${lastMsg}. ` +
     `RPD сбрасывается в полночь UTC. ` +
     `Подождите или проверьте план: https://ai.dev/rate-limit`,
   );
