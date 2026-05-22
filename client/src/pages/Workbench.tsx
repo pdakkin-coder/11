@@ -4,7 +4,7 @@ import {
   Upload, Download, Link2, RefreshCw, CheckCircle2, Hash, Type,
   AlignLeft, ArrowLeftRight, AlertTriangle, Pencil, Save,
   RotateCcw, Bold, Italic, Underline as UnderlineIcon, List, Sparkles,
-  Zap, Settings2, ChevronDown,
+  Zap, Settings2, ChevronDown, Cpu,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,7 +28,7 @@ import { CodexLogo } from "@/components/Logo";
 import { useTheme } from "@/components/ThemeProvider";
 import { DEMO_DOCS, SAMPLE_DOC, SAMPLE_DOC_TITLE, type DemoId } from "@/lib/sampleDoc";
 import {
-  analyzeStructure, convertCitations, countChars, countWords,
+  analyzeStructure, buildEvidencePack, convertCitations, countChars, countWords,
   detectStyle, findCitations, findEditorIssues,
   DEFAULT_SOURCE_TYPES, SOURCE_TYPE_FIELD_LABELS, renderSourceTemplate,
   type CitationStyle, type CustomCitationRules, type FoundItem,
@@ -37,17 +37,20 @@ import {
 import { importFile } from "@/lib/importDoc";
 import { exportDocument, type ExportFormat } from "@/lib/exportDoc";
 import { apiRequest } from "@/lib/queryClient";
-import { useAiAnalyze, mergeFoundItems, type AiAnalyzeResponse } from "@/lib/aiAnalyze";
+import {
+  useAiAnalyze, useAiConvert, mergeFoundItems,
+  type AiAnalyzeResponse, type AiAnalyzeRequest,
+} from "@/lib/aiAnalyze";
 
 type Panel = "structure" | "citations" | "style" | "convert" | "editor" | "stats";
 
 const PANEL_LABELS: Record<Panel, { label: string; icon: typeof FileText }> = {
-  structure: { label: "Структура", icon: Layers },
-  citations: { label: "Цитаты и сноски", icon: BookOpen },
+  structure: { label: "Структура",        icon: Layers },
+  citations: { label: "Цитаты и сноски",  icon: BookOpen },
   style:     { label: "Стиль цитирования", icon: Wand2 },
-  convert:   { label: "Конвертация", icon: ArrowLeftRight },
-  editor:    { label: "Редактура", icon: PenSquare },
-  stats:     { label: "Статистика", icon: Hash },
+  convert:   { label: "Конвертация",       icon: ArrowLeftRight },
+  editor:    { label: "Редактура",         icon: PenSquare },
+  stats:     { label: "Статистика",        icon: Hash },
 };
 
 const TYPE_LABELS: Record<FoundItem["type"], string> = {
@@ -168,13 +171,29 @@ export default function Workbench() {
   const [linkLoading, setLinkLoading]   = useState(false);
   const [driveLoading, setDriveLoading] = useState(false);
   const [aiFound, setAiFound]           = useState<FoundItem[] | null>(null);
-  const { analyze: runAiAnalysis, loading: aiLoading, data: aiData, error: aiError } = useAiAnalyze();
-  const [aiConvertLoading, setAiConvertLoading] = useState(false);
   const [aiSetupOpen, setAiSetupOpen]   = useState(false);
   const [aiTargetStyle, setAiTargetStyle] = useState<CitationStyle | null>(null);
-  // Convert scope state
   const [convertScope, setConvertScope] = useState<string[]>(["citations", "bibliography"]);
   const [convertTargetStyle, setConvertTargetStyle] = useState<CitationStyle>("APA");
+
+  // AI hooks
+  const {
+    analyze: runAiAnalysis,
+    loading: aiLoading,
+    data: aiData,
+    error: aiError,
+    activeModel: aiAnalyzeModel,
+    retryCount: aiAnalyzeRetries,
+  } = useAiAnalyze();
+
+  const {
+    convert: runAiConvert,
+    loading: aiConvertLoading,
+    data: aiConvertData,
+    error: aiConvertError,
+    activeModel: aiConvertModel,
+    retryCount: aiConvertRetries,
+  } = useAiConvert();
 
   const [customRules, setCustomRules]   = useState<CustomCitationRules>({
     name: "Авторский стандарт",
@@ -208,10 +227,39 @@ export default function Workbench() {
     readingMinutes:   Math.max(1, Math.round(countWords(text) / 180)),
   }), [text, structure.paragraphs]);
 
-  // ── AI: analysis only (structure + citation detection) ───────────────────
+  // ── Derived AI status ─────────────────────────────────────────────────────
+  const aiStatusOk      = !aiLoading && !!aiData && !aiError;
+  /** Label to show in the status bar — prefer convert model if convert just ran */
+  const activeModelLabel = aiConvertModel ?? aiAnalyzeModel;
+  const activeRetries    = aiConvertRetries > 0 ? aiConvertRetries : aiAnalyzeRetries;
+
+  // ── AI: analysis — Evidence-Pack pipeline ────────────────────────────────
   async function handleAiAnalyze() {
     if (!text.trim()) return;
-    const result = await runAiAnalysis({ text, language: structure.language });
+
+    // Build Evidence-Pack from heuristic results
+    const pack = typeof buildEvidencePack === "function"
+      ? buildEvidencePack(text, heuristicFound, structure)
+      : null;
+
+    const req: AiAnalyzeRequest = pack
+      ? {
+          heuristicSummary: {
+            style:         detected.style,
+            confidence:    detected.confidence,
+            citationCount: heuristicFound.length,
+            bibCount:      heuristicFound.filter((f) => f.type === "bibliography").length,
+            language:      structure.language as "ru" | "en" | "mixed",
+          },
+          evidence:               pack.evidence,
+          bibliographyCandidates: pack.bibliographyCandidates,
+          structureCandidates:    pack.structureCandidates,
+          scope: ["analyze"],
+        }
+      : // Fallback: legacy format (server accepts both)
+        { text, language: structure.language, scope: ["analyze"] } as unknown as AiAnalyzeRequest;
+
+    const result = await runAiAnalysis(req);
     if (!result) return;
 
     if (result.items?.length) setAiFound(result.items as FoundItem[]);
@@ -225,67 +273,72 @@ export default function Workbench() {
       return;
     }
 
+    const modelNote = result._label ? ` (✓ ${result._label})` : "";
     toast({
-      title: "AI-анализ завершён",
-      description: result.summary ||
+      title: `AI-анализ завершён${modelNote}`,
+      description:
+        result.summary ||
         `Найдено ${result.items?.length ?? 0} элементов` +
-        (result.confidence ? ` (уверенность ${Math.round(result.confidence * 100)}%)` : "") + ".",
+        (result.confidence
+          ? ` (уверенность ${Math.round(result.confidence * 100)}%)`
+          : "") + ".",
     });
   }
 
-  // ── AI: conversion with scope ─────────────────────────────────────────────
+  // ── AI: conversion via useAiConvert ──────────────────────────────────────
   async function handleAiConvert() {
     if (!text.trim() || convertScope.length === 0) return;
-    setAiConvertLoading(true);
-    try {
-      const res = await apiRequest("POST", "/api/ai-convert", {
-        text,
-        targetStyle: convertTargetStyle,
-        scope: convertScope,
-        language: structure.language,
-      });
-      const result = await res.json() as {
-        convertedText?: string | null;
-        summary?: string;
-        error?: string;
-        items?: FoundItem[];
-        confidence?: number;
-        _model?: string;
-      };
 
-      if (result.error) {
-        if (result.error.includes("GEMINI_API_KEY") || result.error.includes("501")) {
-          setAiSetupOpen(true);
+    const pack = typeof buildEvidencePack === "function"
+      ? buildEvidencePack(text, heuristicFound, structure)
+      : null;
+
+    const baseReq = pack
+      ? {
+          heuristicSummary: {
+            style:         detected.style,
+            confidence:    detected.confidence,
+            citationCount: heuristicFound.length,
+            bibCount:      heuristicFound.filter((f) => f.type === "bibliography").length,
+            language:      structure.language as "ru" | "en" | "mixed",
+          },
+          evidence:               pack.evidence,
+          bibliographyCandidates: pack.bibliographyCandidates,
+          structureCandidates:    pack.structureCandidates,
         }
-        toast({ title: "AI-конвертация не удалась", description: result.error, variant: "destructive" });
-        return;
-      }
+      : { text, language: structure.language } as unknown as Omit<AiAnalyzeRequest, "scope">;
 
-      if (result.items?.length) setAiFound(result.items as FoundItem[]);
+    const result = await runAiConvert(
+      baseReq as Omit<AiAnalyzeRequest, "scope">,
+      convertTargetStyle,
+    );
+    if (!result) return;
 
-      if (result.convertedText && result.convertedText.trim()) {
-        setText(result.convertedText);
-        setDraft(result.convertedText);
-        setPreview(null);
-        setAiTargetStyle(convertTargetStyle);
-        toast({
-          title: "AI-конвертация применена",
-          description: `Документ переформатирован: ${convertScope.join(", ")} → ${convertTargetStyle}${result._model ? ` (${result._model})` : ""}. Проверьте вручную.`,
-        });
-      } else {
-        toast({
-          title: "AI-конвертация завершена",
-          description: result.summary || "Изменений не потребовалось или Gemini не вернул текст.",
-        });
+    if (result.error) {
+      if (result.error.includes("GEMINI_API_KEY") || result.error.includes("501")) {
+        setAiSetupOpen(true);
       }
-    } catch (err) {
+      toast({ title: "AI-конвертация не удалась", description: result.error, variant: "destructive" });
+      return;
+    }
+
+    if (result.items?.length) setAiFound(result.items as FoundItem[]);
+
+    if (result.convertedText?.trim()) {
+      setText(result.convertedText);
+      setDraft(result.convertedText);
+      setPreview(null);
+      setAiTargetStyle(convertTargetStyle);
+      const modelNote = result._label ? ` — ${result._label}` : "";
       toast({
-        title: "AI-конвертация не удалась",
-        description: err instanceof Error ? err.message : "Проверьте подключение.",
-        variant: "destructive",
+        title: "AI-конвертация применена",
+        description: `Документ переформатирован: ${convertScope.join(", ")} → ${convertTargetStyle}${modelNote}. Проверьте вручную.`,
       });
-    } finally {
-      setAiConvertLoading(false);
+    } else {
+      toast({
+        title: "AI-конвертация завершена",
+        description: result.summary || "Изменений не потребовалось или Gemini не вернул текст.",
+      });
     }
   }
 
@@ -392,7 +445,6 @@ export default function Workbench() {
   }
 
   const currentText = preview?.text ?? text;
-  const aiStatusOk = !aiLoading && !!aiData && !aiError;
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground" data-testid="workbench">
@@ -444,24 +496,49 @@ export default function Workbench() {
       </header>
 
       {/* ── AI Status bar ───────────────────────────────────────────────────── */}
-      {(aiLoading || aiConvertLoading || aiData || aiError) && (
+      {(aiLoading || aiConvertLoading || aiData || aiConvertData || aiError || aiConvertError) && (
         <div className="h-7 border-b px-4 flex items-center gap-2 text-[11px] bg-muted/40">
-          <Sparkles className="h-3.5 w-3.5 text-primary" />
-          {(aiLoading || aiConvertLoading) && <span>{aiConvertLoading ? "AI-конвертация выполняется…" : "AI-анализ выполняется…"}</span>}
-          {aiStatusOk && !aiConvertLoading && (
-            <span>
-              AI‑анализ активен: {aiData!.items.length} элементов, стиль{" "}
-              {aiData!.detectedStyle} ({Math.round((aiData!.confidence ?? 0) * 100)}%).
-              {aiTargetStyle && <> · конвертация в <strong>{aiTargetStyle}</strong> применена.</>}
+          <Sparkles className="h-3.5 w-3.5 text-primary shrink-0" />
+
+          {/* Loading states */}
+          {(aiLoading || aiConvertLoading) && (
+            <span className="text-muted-foreground">
+              {aiConvertLoading ? "AI-конвертация…" : "AI-анализ…"}
+              {activeRetries > 0 && (
+                <span className="text-amber-600 dark:text-amber-400 ml-1">
+                  (повторная попытка {activeRetries})
+                </span>
+              )}
             </span>
           )}
-          {!aiLoading && !aiConvertLoading && aiError && (
+
+          {/* Success state */}
+          {aiStatusOk && !aiConvertLoading && !aiLoading && (
+            <span className="flex items-center gap-1.5 min-w-0">
+              <span>
+                AI‑анализ активен: {aiData!.items.length} эл. — {aiData!.detectedStyle}
+                {" "}({Math.round((aiData!.confidence ?? 0) * 100)}%)
+              </span>
+              {aiTargetStyle && (
+                <span> · конвертация в <strong>{aiTargetStyle}</strong> применена.</span>
+              )}
+              {/* Model badge */}
+              {activeModelLabel && (
+                <Badge variant="outline" className="ml-1 text-[10px] px-1.5 py-0 h-4 gap-1 shrink-0">
+                  <Cpu className="h-2.5 w-2.5" />{activeModelLabel}
+                </Badge>
+              )}
+            </span>
+          )}
+
+          {/* Error state */}
+          {!aiLoading && !aiConvertLoading && (aiError || aiConvertError) && (
             <button
               type="button"
-              className="text-destructive underline-offset-2 hover:underline"
+              className="text-destructive underline-offset-2 hover:underline truncate"
               onClick={() => setAiSetupOpen(true)}
             >
-              AI недоступен: {aiError}
+              AI недоступен: {aiConvertError ?? aiError}
             </button>
           )}
         </div>
@@ -500,6 +577,9 @@ export default function Workbench() {
             <p>1. Получите бесплатный ключ на <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary underline">aistudio.google.com</a>.</p>
             <p>2. Установите переменную окружения: <code className="bg-muted px-1 rounded">GEMINI_API_KEY=ваш_ключ</code></p>
             <p>3. Перезапустите сервер (<code className="bg-muted px-1 rounded">npm run dev</code>).</p>
+            <p className="text-[11px] pt-1">
+              Модельный каскад: {["Gemini 2.5 Flash", "Gemini 3.5 Flash", "Gemini 3.1 Flash Lite"].join(" → ")}
+            </p>
           </div>
           <DialogFooter>
             <Button onClick={() => setAiSetupOpen(false)}>Понятно</Button>
@@ -539,7 +619,7 @@ export default function Workbench() {
             ))}
           </nav>
 
-          {/* Demo selector — at the bottom of the sidebar */}
+          {/* Demo selector */}
           <div className="p-2 border-t">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wide px-1 mb-1.5">Демо-документы</p>
             <Select onValueChange={(v) => loadDemo(v as DemoId)}>
@@ -564,7 +644,6 @@ export default function Workbench() {
 
         {/* ── Document editor ───────────────────────────────────────────────── */}
         <main className="flex-1 flex flex-col min-w-0 relative">
-          {/* Toolbar */}
           {editMode && (
             <div className="h-9 border-b flex items-center gap-1 px-3 bg-muted/20 shrink-0">
               <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("bold")}><Bold className="h-3.5 w-3.5" /></Button>
@@ -583,7 +662,6 @@ export default function Workbench() {
             </div>
           )}
 
-          {/* Preview banner */}
           {preview && (
             <div className="h-9 border-b flex items-center gap-3 px-4 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 text-sm shrink-0">
               <RefreshCw className="h-4 w-4" />
@@ -611,7 +689,6 @@ export default function Workbench() {
             </div>
           </ScrollArea>
 
-          {/* Edit mode toggle */}
           {!editMode && (
             <button
               type="button"
@@ -630,7 +707,6 @@ export default function Workbench() {
           style={{ width: rightPanel.width }}
           data-testid="right-panel"
         >
-          {/* Resize handle */}
           <div
             className="absolute top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/30 transition-colors z-10"
             style={{ left: 0 }}
@@ -639,6 +715,7 @@ export default function Workbench() {
 
           <ScrollArea className="flex-1">
             <div className="p-4">
+
               {/* ── Structure panel ─────────────────────────────────────── */}
               {panel === "structure" && (
                 <div className="space-y-3">
@@ -646,8 +723,6 @@ export default function Workbench() {
                     <h2 className="text-sm font-semibold">Структура документа</h2>
                     <Badge variant="outline" className="text-[10px]">{structure.sections.length} разд.</Badge>
                   </div>
-
-                  {/* Language + paragraph count */}
                   <div className="flex gap-2">
                     <Badge variant="secondary" className="text-[10px] gap-1">
                       <Type className="h-3 w-3" />{structure.language === "ru" ? "RU" : structure.language === "en" ? "EN" : "RU+EN"}
@@ -656,8 +731,6 @@ export default function Workbench() {
                       <AlignLeft className="h-3 w-3" />{structure.paragraphs} абз.
                     </Badge>
                   </div>
-
-                  {/* Sections list */}
                   {structure.sections.length === 0 ? (
                     <p className="text-xs text-muted-foreground">Разделы не обнаружены.</p>
                   ) : (
@@ -665,7 +738,7 @@ export default function Workbench() {
                       {structure.sections.map((sec, i) => (
                         <div
                           key={i}
-                          className="flex items-start gap-2 p-2 rounded-md hover:bg-muted/50 cursor-pointer transition-colors group"
+                          className="flex items-start gap-2 p-2 rounded-md hover:bg-muted/50 cursor-pointer transition-colors"
                           style={{ paddingLeft: `${(sec.level ?? 1) * 0.5 + 0.5}rem` }}
                         >
                           <span className="text-[10px] text-muted-foreground mt-0.5 shrink-0 w-4 text-right">{sec.level ?? 1}</span>
@@ -675,8 +748,6 @@ export default function Workbench() {
                       ))}
                     </div>
                   )}
-
-                  {/* AI structure hint */}
                   {!aiData && (
                     <p className="text-[11px] text-muted-foreground pt-1">
                       Запустите <span className="font-medium">AI-анализ</span> для уточнённого распознавания разделов.
@@ -692,8 +763,6 @@ export default function Workbench() {
                     <h2 className="text-sm font-semibold">Цитаты и сноски</h2>
                     <Badge variant="outline" className="text-[10px]">{found.length}</Badge>
                   </div>
-
-                  {/* Search */}
                   <div className="relative">
                     <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                     <Input
@@ -703,8 +772,6 @@ export default function Workbench() {
                       className="pl-8 h-8 text-xs"
                     />
                   </div>
-
-                  {/* Type filter */}
                   <Select value={typeFilter} onValueChange={setTypeFilter}>
                     <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -714,8 +781,6 @@ export default function Workbench() {
                       ))}
                     </SelectContent>
                   </Select>
-
-                  {/* Legend */}
                   <div className="flex flex-wrap gap-x-3 gap-y-1">
                     {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([type, label]) => (
                       <span key={type} className="flex items-center gap-1 text-[10px] text-muted-foreground">
@@ -724,8 +789,6 @@ export default function Workbench() {
                       </span>
                     ))}
                   </div>
-
-                  {/* List */}
                   {filteredFound.length === 0 ? (
                     <p className="text-xs text-muted-foreground">Ничего не найдено.</p>
                   ) : (
@@ -747,6 +810,11 @@ export default function Workbench() {
                           <div className="flex items-center gap-1.5 mb-0.5">
                             <span className={`w-2 h-2 rounded-full shrink-0 ${legendDotClass(item.type)}`} />
                             <span className="font-medium text-[10px] uppercase tracking-wide text-muted-foreground">{TYPE_LABELS[item.type]}</span>
+                            {item.source && item.source !== "heuristic" && (
+                              <Badge variant="secondary" className="text-[9px] px-1 py-0 h-3.5 ml-0.5">
+                                {item.source === "ai" ? "AI" : "⊙"}
+                              </Badge>
+                            )}
                             {item.confidence !== undefined && (
                               <span className="ml-auto text-[10px] text-muted-foreground">{Math.round(item.confidence * 100)}%</span>
                             )}
@@ -768,6 +836,12 @@ export default function Workbench() {
                     <p className="text-xs text-muted-foreground">Обнаруженный стиль</p>
                     <p className="text-sm font-semibold">{detected.style}</p>
                     <p className="text-xs text-muted-foreground">Уверенность: {Math.round(detected.confidence * 100)}%</p>
+                    {aiData?.detectedStyle && aiData.detectedStyle !== detected.style && (
+                      <p className="text-xs text-primary">
+                        AI уточняет: {aiData.detectedStyle}
+                        {" "}({Math.round((aiData.confidence ?? 0) * 100)}%)
+                      </p>
+                    )}
                   </div>
                   {detected.notes.length > 0 && (
                     <div className="space-y-1">
@@ -789,21 +863,19 @@ export default function Workbench() {
                   {/* Heuristic conversion */}
                   <div className="space-y-2">
                     <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">Эвристическая</p>
-                    <div className="flex gap-2">
-                      <Select
-                        onValueChange={(v) => {
-                          const result = convertCitations(text, v as CitationStyle);
-                          setPreview({ target: v as CitationStyle, text: result });
-                        }}
-                      >
-                        <SelectTrigger className="h-8 text-xs flex-1"><SelectValue placeholder="Выберите стиль…" /></SelectTrigger>
-                        <SelectContent>
-                          {(["APA", "Chicago", "MLA", "IEEE", "Vancouver", "Harvard", "GOST"] as CitationStyle[]).map((s) => (
-                            <SelectItem key={s} value={s}>{s}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
+                    <Select
+                      onValueChange={(v) => {
+                        const result = convertCitations(text, v as CitationStyle);
+                        setPreview({ target: v as CitationStyle, text: result });
+                      }}
+                    >
+                      <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Выберите стиль…" /></SelectTrigger>
+                      <SelectContent>
+                        {(["APA", "Chicago", "MLA", "IEEE", "Vancouver", "Harvard", "GOST"] as CitationStyle[]).map((s) => (
+                          <SelectItem key={s} value={s}>{s}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     {preview && (
                       <p className="text-[11px] text-amber-600 dark:text-amber-400">
                         Предпросмотр активен — подтвердите в документе.
@@ -815,9 +887,15 @@ export default function Workbench() {
 
                   {/* AI conversion */}
                   <div className="space-y-3">
-                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">AI-конвертация (Gemini)</p>
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">AI-конвертация (Gemini)</p>
+                      {aiConvertModel && (
+                        <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 gap-1">
+                          <Cpu className="h-2.5 w-2.5" />{aiConvertModel}
+                        </Badge>
+                      )}
+                    </div>
 
-                    {/* Target style */}
                     <div className="space-y-1">
                       <Label className="text-xs">Целевой стиль</Label>
                       <Select value={convertTargetStyle} onValueChange={(v) => setConvertTargetStyle(v as CitationStyle)}>
@@ -830,7 +908,6 @@ export default function Workbench() {
                       </Select>
                     </div>
 
-                    {/* Scope checkboxes */}
                     <div className="space-y-1">
                       <Label className="text-xs">Что конвертировать</Label>
                       <div className="space-y-1.5">
@@ -859,7 +936,11 @@ export default function Workbench() {
                       data-testid="button-ai-convert"
                     >
                       <Zap className="h-3.5 w-3.5 mr-1.5" />
-                      {aiConvertLoading ? "Конвертация…" : `AI-конвертация (${convertScope.length})`}
+                      {aiConvertLoading
+                        ? aiConvertRetries > 0
+                          ? `Повторная попытка ${aiConvertRetries}…`
+                          : "Конвертация…"
+                        : `AI-конвертация (${convertScope.length})`}
                     </Button>
                     <p className="text-[10px] text-muted-foreground">
                       Gemini переформатирует выбранные блоки. Результат применяется к документу — проверьте вручную.
@@ -940,6 +1021,7 @@ export default function Workbench() {
                   </div>
                 </div>
               )}
+
             </div>
           </ScrollArea>
         </div>
