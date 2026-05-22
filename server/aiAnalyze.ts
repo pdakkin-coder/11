@@ -137,19 +137,21 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
   if (targetStyle) hints.push(`Target style for conversion: ${targetStyle}`);
   const userMsg = [...hints, "---BEGIN DOCUMENT---", text, "---END DOCUMENT---"].join("\n");
 
+  // systemInstruction carries the role-less prompt — avoids the role:"model" first-turn bug
+  const systemInstruction = { parts: [{ text: SYSTEM_PROMPT }] };
   const contents = [
-    { role: "user",  parts: [{ text: SYSTEM_PROMPT }] },
-    { role: "model", parts: [{ text: "Understood. I will analyze the document and return only valid JSON with no markdown fences." }] },
-    { role: "user",  parts: [{ text: userMsg }] },
+    { role: "user", parts: [{ text: userMsg }] },
   ];
 
+  // responseMimeType is NOT used — it is unsupported by gemini-3.5-flash / gemini-3.1-flash-lite
+  // and causes 400 Bad Request which breaks the cascade. JSON is extracted via markdown-fence
+  // stripping in geminiRouter.ts instead.
   const generationConfig = {
     temperature: 0,
-    responseMimeType: "application/json",
   };
 
   try {
-    const { raw, model } = await callGemini(contents, generationConfig, apiKey);
+    const { raw, model } = await callGemini(contents, generationConfig, apiKey, systemInstruction);
 
     let parsed: Record<string, unknown> = {};
     try {
