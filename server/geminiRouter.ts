@@ -1,9 +1,11 @@
 import type { Request, Response } from "express";
 
-const PRIMARY_MODEL  = "gemini-2.5-flash";
-const FALLBACK_MODEL = "gemini-1.5-flash";
+const MODELS = [
+  { id: "gemini-2.5-flash",    label: "Gemini 2.5 Flash" },
+  { id: "gemini-1.5-flash",    label: "Gemini 1.5 Flash (fallback)" },
+  { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash-8B (fallback)" },
+] as const;
 
-// Renamed from URL to avoid shadowing globalThis.URL
 function geminiUrl(model: string): string {
   return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 }
@@ -55,13 +57,13 @@ function buildPrompt(text: string, language: string, targetStyle?: string): stri
   return lines.join("\n");
 }
 
-/** Call one Gemini model. Returns { ok, status, body }. Never throws. */
+/** Call one Gemini model. Returns { ok, status, body, aborted }. Never throws. */
 async function callGemini(
   apiKey: string,
   model: string,
   prompt: string,
   signal?: AbortSignal,
-): Promise<{ ok: boolean; status: number; body: string }> {
+): Promise<{ ok: boolean; status: number; body: string; aborted: boolean }> {
   try {
     const res = await fetch(`${geminiUrl(model)}?key=${apiKey}`, {
       method:  "POST",
@@ -74,11 +76,21 @@ async function callGemini(
       signal,
     });
     const body = await res.text();
-    return { ok: res.ok, status: res.status, body };
+    return { ok: res.ok, status: res.status, body, aborted: false };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, status: 0, body: msg };
+    const aborted =
+      (err instanceof Error && err.name === "AbortError") ||
+      msg.toLowerCase().includes("abort");
+    return { ok: false, status: 0, body: msg, aborted };
   }
+}
+
+/** Returns true when we should try the next model in the cascade. */
+function shouldTryNext(r: { ok: boolean; status: number; aborted: boolean }): boolean {
+  if (r.ok) return false;
+  // quota / overload / network / abort → retry with next tier
+  return r.aborted || r.status === 429 || r.status === 503 || r.status === 0;
 }
 
 export async function handleAiAnalyze(req: Request, res: Response): Promise<void> {
@@ -104,24 +116,29 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
 
   const prompt = buildPrompt(text, language, targetStyle);
 
-  // --- Try PRIMARY model, fall back to FALLBACK on quota/overload ---
-  let geminiResult = await callGemini(apiKey, PRIMARY_MODEL, prompt);
-  let usedModel    = PRIMARY_MODEL;
-  let usedLabel    = "Gemini 2.5 Flash";
+  // --- Cascade through models ---
+  let geminiResult!: { ok: boolean; status: number; body: string; aborted: boolean };
+  let usedModel = MODELS[0].id;
+  let usedLabel = MODELS[0].label;
 
-  const shouldFallback =
-    !geminiResult.ok &&
-    (geminiResult.status === 429 || geminiResult.status === 503 || geminiResult.status === 0);
+  for (const model of MODELS) {
+    geminiResult = await callGemini(apiKey, model.id, prompt);
+    usedModel    = model.id;
+    usedLabel    = model.label;
 
-  if (shouldFallback) {
-    console.warn(`[gemini] ${PRIMARY_MODEL} returned ${geminiResult.status}, retrying with ${FALLBACK_MODEL}`);
-    geminiResult = await callGemini(apiKey, FALLBACK_MODEL, prompt);
-    usedModel    = FALLBACK_MODEL;
-    usedLabel    = "Gemini 1.5 Flash (fallback)";
+    if (geminiResult.ok) break;
+
+    if (shouldTryNext(geminiResult)) {
+      console.warn(`[gemini] ${model.id} returned ${geminiResult.status} (abort=${geminiResult.aborted}), trying next model`);
+      continue;
+    }
+
+    // Hard error (4xx other than 429) — no point retrying
+    break;
   }
 
   if (!geminiResult.ok) {
-    console.error(`[gemini] ${usedModel} ${geminiResult.status}:`, geminiResult.body.slice(0, 300));
+    console.error(`[gemini] all models failed. last: ${usedModel} ${geminiResult.status}:`, geminiResult.body.slice(0, 300));
     const status = geminiResult.status || 502;
     res.status(status).json({ error: geminiResult.body });
     return;
