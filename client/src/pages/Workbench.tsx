@@ -4,7 +4,7 @@ import {
   Upload, Download, Link2, RefreshCw, CheckCircle2, Hash, Type,
   AlignLeft, ArrowLeftRight, AlertTriangle, Pencil, Save,
   RotateCcw, Bold, Italic, Underline as UnderlineIcon, List, Sparkles,
-  Zap,
+  Zap, Settings2, ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,10 +15,14 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter,
   DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import { CodexLogo } from "@/components/Logo";
 import { useTheme } from "@/components/ThemeProvider";
@@ -80,7 +84,6 @@ function legendDotClass(type: FoundItem["type"]): string {
   }
 }
 
-// ключ "канцелярит" синхронизирован с типом EditorIssue в analyze.ts
 const ISSUE_LABELS: Record<EditorIssue["type"], string> = {
   "длинное-предложение":      "Длинное предложение",
   "пассив":                   "Пассивная конструкция",
@@ -91,6 +94,15 @@ const ISSUE_LABELS: Record<EditorIssue["type"], string> = {
   "пунктуация":               "Пунктуация",
   "канцелярит":               "Канцеляризм",
 };
+
+// Convert scope options
+const CONVERT_SCOPE_OPTIONS: { id: string; label: string; description: string }[] = [
+  { id: "citations",    label: "Цитаты",          description: "Внутритекстовые ссылки" },
+  { id: "bibliography", label: "Библиография",     description: "Список литературы" },
+  { id: "structure",    label: "Структура",        description: "Заголовки разделов" },
+  { id: "typos",        label: "Опечатки",         description: "Орфография и типографика" },
+  { id: "syntax",       label: "Синтаксис",        description: "Знаки препинания, тире, кавычки" },
+];
 
 // ── Drag-to-resize hook ───────────────────────────────────────────────────────
 function useDragResize(
@@ -157,9 +169,13 @@ export default function Workbench() {
   const [driveLoading, setDriveLoading] = useState(false);
   const [aiFound, setAiFound]           = useState<FoundItem[] | null>(null);
   const { analyze: runAiAnalysis, loading: aiLoading, data: aiData, error: aiError } = useAiAnalyze();
+  const [aiConvertLoading, setAiConvertLoading] = useState(false);
   const [aiSetupOpen, setAiSetupOpen]   = useState(false);
-  // Последний целевой стиль, переданный в AI-анализ (для ConvertPanel)
   const [aiTargetStyle, setAiTargetStyle] = useState<CitationStyle | null>(null);
+  // Convert scope state
+  const [convertScope, setConvertScope] = useState<string[]>(["citations", "bibliography"]);
+  const [convertTargetStyle, setConvertTargetStyle] = useState<CitationStyle>("APA");
+
   const [customRules, setCustomRules]   = useState<CustomCitationRules>({
     name: "Авторский стандарт",
     mode: "author-date",
@@ -192,24 +208,13 @@ export default function Workbench() {
     readingMinutes:   Math.max(1, Math.round(countWords(text) / 180)),
   }), [text, structure.paragraphs]);
 
-  /**
-   * Run AI analysis with an optional targetStyle for conversion.
-   * If the AI returns convertedText, apply it directly to the document.
-   */
-  async function handleAiAnalyze(targetStyle?: CitationStyle) {
+  // ── AI: analysis only (structure + citation detection) ───────────────────
+  async function handleAiAnalyze() {
     if (!text.trim()) return;
-    const req = {
-      text,
-      language: structure.language,
-      ...(targetStyle ? { targetStyle } : {}),
-    };
-    const result = await runAiAnalysis(req);
+    const result = await runAiAnalysis({ text, language: structure.language });
     if (!result) return;
 
-    // Update found citations from AI
-    if (result.items?.length) {
-      setAiFound(result.items as FoundItem[]);
-    }
+    if (result.items?.length) setAiFound(result.items as FoundItem[]);
 
     if (result.error) {
       const msg = result.error;
@@ -220,31 +225,67 @@ export default function Workbench() {
       return;
     }
 
-    // If AI returned a converted document — apply it immediately
-    if (targetStyle && result.convertedText && result.convertedText.trim()) {
-      setText(result.convertedText);
-      setDraft(result.convertedText);
-      setPreview(null);
-      setAiTargetStyle(targetStyle);
-      toast({
-        title: "AI-конвертация применена",
-        description: `Документ переформатирован в ${targetStyle} (Gemini). Проверьте вручную.`,
+    toast({
+      title: "AI-анализ завершён",
+      description: result.summary ||
+        `Найдено ${result.items?.length ?? 0} элементов` +
+        (result.confidence ? ` (уверенность ${Math.round(result.confidence * 100)}%)` : "") + ".",
+    });
+  }
+
+  // ── AI: conversion with scope ─────────────────────────────────────────────
+  async function handleAiConvert() {
+    if (!text.trim() || convertScope.length === 0) return;
+    setAiConvertLoading(true);
+    try {
+      const res = await apiRequest("POST", "/api/ai-convert", {
+        text,
+        targetStyle: convertTargetStyle,
+        scope: convertScope,
+        language: structure.language,
       });
-    } else {
-      if (targetStyle) {
-        setAiTargetStyle(targetStyle);
+      const result = await res.json() as {
+        convertedText?: string | null;
+        summary?: string;
+        error?: string;
+        items?: FoundItem[];
+        confidence?: number;
+        _model?: string;
+      };
+
+      if (result.error) {
+        if (result.error.includes("GEMINI_API_KEY") || result.error.includes("501")) {
+          setAiSetupOpen(true);
+        }
+        toast({ title: "AI-конвертация не удалась", description: result.error, variant: "destructive" });
+        return;
+      }
+
+      if (result.items?.length) setAiFound(result.items as FoundItem[]);
+
+      if (result.convertedText && result.convertedText.trim()) {
+        setText(result.convertedText);
+        setDraft(result.convertedText);
+        setPreview(null);
+        setAiTargetStyle(convertTargetStyle);
         toast({
-          title: "AI-анализ завершён",
-          description: "Gemini не вернул преобразованный текст. Используйте эвристическую конвертацию.",
+          title: "AI-конвертация применена",
+          description: `Документ переформатирован: ${convertScope.join(", ")} → ${convertTargetStyle}${result._model ? ` (${result._model})` : ""}. Проверьте вручную.`,
         });
       } else {
         toast({
-          title: "AI-анализ завершён",
-          description: result.summary ||
-            `Найдено ${result.items?.length ?? 0} элементов` +
-            (result.confidence ? ` (уверенность ${Math.round(result.confidence * 100)}%)` : "") + ".",
+          title: "AI-конвертация завершена",
+          description: result.summary || "Изменений не потребовалось или Gemini не вернул текст.",
         });
       }
+    } catch (err) {
+      toast({
+        title: "AI-конвертация не удалась",
+        description: err instanceof Error ? err.message : "Проверьте подключение.",
+        variant: "destructive",
+      });
+    } finally {
+      setAiConvertLoading(false);
     }
   }
 
@@ -344,6 +385,12 @@ export default function Workbench() {
     toast({ title: "Конвертация применена", description: `Документ переформатирован в ${t}.` });
   }
 
+  function toggleScope(id: string) {
+    setConvertScope((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  }
+
   const currentText = preview?.text ?? text;
   const aiStatusOk = !aiLoading && !!aiData && !aiError;
 
@@ -351,7 +398,7 @@ export default function Workbench() {
     <div className="flex flex-col h-screen bg-background text-foreground" data-testid="workbench">
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <header className="h-14 border-b flex items-center px-4 gap-3 shrink-0 bg-background/80 backdrop-blur" data-testid="header">
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5 shrink-0">
           <CodexLogo size={28} />
           <div className="leading-none select-none">
             <div className="text-[15px] font-semibold tracking-tight text-foreground">CitaDex</div>
@@ -359,12 +406,11 @@ export default function Workbench() {
           </div>
         </div>
         <Separator orientation="vertical" className="h-7 mx-2" />
-        <div className="flex items-center gap-2 text-sm min-w-0">
-          <FileText className="h-4 w-4 text-muted-foreground" />
+        <div className="flex items-center gap-2 text-sm min-w-0 flex-1">
+          <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
           <span className="font-medium truncate max-w-[28ch]" data-testid="text-docname">{docName}</span>
-          <Badge variant="outline" className="text-[10px] uppercase tracking-wide ml-1">демо</Badge>
         </div>
-        <div className="ml-auto flex items-center gap-2 shrink-0 overflow-x-auto">
+        <div className="ml-auto flex items-center gap-2 shrink-0">
           <input ref={fileInput} type="file" accept=".docx,.txt,.md" onChange={handleFile} className="hidden" data-testid="input-file" />
           <Button variant="outline" size="sm" onClick={() => fileInput.current?.click()} data-testid="button-import">
             <Upload className="h-4 w-4 mr-1.5" />Импорт
@@ -387,14 +433,10 @@ export default function Workbench() {
           <Button variant="outline" size="sm" onClick={handleDriveExport} disabled={driveLoading} data-testid="button-export-drive">
             <Upload className="h-4 w-4 mr-1.5" />{driveLoading ? "Drive…" : "В Drive"}
           </Button>
-          <Button variant="outline" size="sm" onClick={() => handleAiAnalyze()} disabled={aiLoading || !text.trim()} data-testid="button-ai-analyze"
-            title="Анализ цитирования через Gemini AI. Требует GEMINI_API_KEY.">
+          <Button variant="outline" size="sm" onClick={handleAiAnalyze} disabled={aiLoading || !text.trim()} data-testid="button-ai-analyze"
+            title="Анализ структуры и цитирования через Gemini AI">
             <Sparkles className="h-4 w-4 mr-1.5" />{aiLoading ? "AI…" : "AI-анализ"}
           </Button>
-          <Select onValueChange={(v) => loadDemo(v as DemoId)}>
-            <SelectTrigger className="h-9 w-[180px]" data-testid="select-demo"><SelectValue placeholder="Демо-документ" /></SelectTrigger>
-            <SelectContent>{DEMO_DOCS.map((d) => (<SelectItem key={d.id} value={d.id}>{d.label}</SelectItem>))}</SelectContent>
-          </Select>
           <Button variant="ghost" size="icon" onClick={toggle} data-testid="button-theme">
             {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </Button>
@@ -402,20 +444,18 @@ export default function Workbench() {
       </header>
 
       {/* ── AI Status bar ───────────────────────────────────────────────────── */}
-      {(aiLoading || aiData || aiError) && (
+      {(aiLoading || aiConvertLoading || aiData || aiError) && (
         <div className="h-7 border-b px-4 flex items-center gap-2 text-[11px] bg-muted/40">
           <Sparkles className="h-3.5 w-3.5 text-primary" />
-          {aiLoading && <span>AI‑анализ выполняется…</span>}
-          {aiStatusOk && (
+          {(aiLoading || aiConvertLoading) && <span>{aiConvertLoading ? "AI-конвертация выполняется…" : "AI-анализ выполняется…"}</span>}
+          {aiStatusOk && !aiConvertLoading && (
             <span>
               AI‑анализ активен: {aiData!.items.length} элементов, стиль{" "}
               {aiData!.detectedStyle} ({Math.round((aiData!.confidence ?? 0) * 100)}%).
-              {aiData!.convertedText && aiTargetStyle && (
-                <> · конвертация в <strong>{aiTargetStyle}</strong> применена.</>
-              )}
+              {aiTargetStyle && <> · конвертация в <strong>{aiTargetStyle}</strong> применена.</>}
             </span>
           )}
-          {!aiLoading && aiError && (
+          {!aiLoading && !aiConvertLoading && aiError && (
             <button
               type="button"
               className="text-destructive underline-offset-2 hover:underline"
@@ -429,54 +469,37 @@ export default function Workbench() {
 
       {/* ── Import-by-link dialog ──────────────────────────────────────────── */}
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
-        <DialogContent className="sm:max-w-xl" data-testid="dialog-import-link">
+        <DialogContent className="sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle>Импорт документа по ссылке</DialogTitle>
-            <DialogDescription>Поддерживаются публичные ссылки на DOCX/TXT/MD/HTML, Google Docs и Google Drive.</DialogDescription>
+            <DialogTitle>Импорт по ссылке</DialogTitle>
+            <DialogDescription>Укажите публичную ссылку на документ (.docx, .txt, .md или Google Docs).</DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <Input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)}
-              placeholder="https://docs.google.com/document/d/…" data-testid="input-import-link" />
-            <p className="text-xs text-muted-foreground leading-snug">Для закрытых документов сначала откройте доступ по ссылке.</p>
-          </div>
+          <Input
+            placeholder="https://docs.google.com/document/d/…"
+            value={linkUrl}
+            onChange={(e) => setLinkUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleUrlImport()}
+          />
           <DialogFooter>
-            <Button variant="outline" onClick={() => setLinkDialogOpen(false)} data-testid="button-cancel-link">Отмена</Button>
-            <Button onClick={handleUrlImport} disabled={linkLoading} data-testid="button-load-link">{linkLoading ? "Загрузка…" : "Загрузить"}</Button>
+            <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>Отмена</Button>
+            <Button onClick={handleUrlImport} disabled={linkLoading || !linkUrl.trim()}>
+              {linkLoading ? "Загрузка…" : "Импортировать"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* ── AI Setup dialog ────────────────────────────────────────────────── */}
+      {/* ── AI Setup hint dialog ───────────────────────────────────────────── */}
       <Dialog open={aiSetupOpen} onOpenChange={setAiSetupOpen}>
-        <DialogContent className="sm:max-w-lg" data-testid="dialog-ai-setup">
+        <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Sparkles className="h-5 w-5 text-primary" />
-              Настройка AI-анализа
-            </DialogTitle>
-            <DialogDescription>
-              AI-анализ использует Google Gemini для точного распознавания цитат и стилей.
-            </DialogDescription>
+            <DialogTitle>Настройка Gemini AI</DialogTitle>
+            <DialogDescription>Для AI-анализа и AI-конвертации необходим ключ Gemini API.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-3 text-[13px]">
-            <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/5 p-3 space-y-1.5">
-              <div className="font-semibold text-yellow-600 dark:text-yellow-400">Требуется GEMINI_API_KEY</div>
-              <div className="text-muted-foreground leading-snug">
-                Переменная окружения <code className="font-mono bg-muted px-1 rounded text-[12px]">GEMINI_API_KEY</code> не задана на сервере.
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <div className="font-medium">Как активировать:</div>
-              <ol className="list-decimal list-inside space-y-1 text-muted-foreground leading-snug">
-                <li>Получите ключ на <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-primary underline">aistudio.google.com/apikey</a></li>
-                <li>Создайте файл <code className="font-mono bg-muted px-1 rounded text-[12px]">.env</code> в корне проекта</li>
-                <li>Добавьте строку:<br /><code className="font-mono bg-muted px-1.5 py-1 rounded text-[12px] mt-1 block">GEMINI_API_KEY=AIza…ваш_ключ…</code></li>
-                <li>Перезапустите сервер: <code className="font-mono bg-muted px-1 rounded text-[12px]">npm run dev</code></li>
-              </ol>
-            </div>
-            <div className="rounded-md border p-3 bg-muted/20 text-[12px] text-muted-foreground">
-              <span className="font-medium">Без ключа</span> — работает эвристический анализ. Gemini добавляет точность распознавания стилей и полей библиографии.
-            </div>
+          <div className="text-sm space-y-2 text-muted-foreground">
+            <p>1. Получите бесплатный ключ на <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary underline">aistudio.google.com</a>.</p>
+            <p>2. Установите переменную окружения: <code className="bg-muted px-1 rounded">GEMINI_API_KEY=ваш_ключ</code></p>
+            <p>3. Перезапустите сервер (<code className="bg-muted px-1 rounded">npm run dev</code>).</p>
           </div>
           <DialogFooter>
             <Button onClick={() => setAiSetupOpen(false)}>Понятно</Button>
@@ -484,746 +507,443 @@ export default function Workbench() {
         </DialogContent>
       </Dialog>
 
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* ── Sidebar ───────────────────────────────────────────────────────── */}
+      {/* ── Main layout ─────────────────────────────────────────────────────── */}
+      <div className="flex flex-1 min-h-0">
+        {/* ── Left sidebar ──────────────────────────────────────────────────── */}
         <aside
-          className="shrink-0 border-r bg-sidebar/60 flex flex-col min-h-0 overflow-hidden"
+          className="flex flex-col border-r bg-muted/30 shrink-0"
           style={{ width: sidebar.width }}
           data-testid="sidebar"
         >
-          <nav className="p-2 space-y-0.5 shrink-0">
-            {(Object.keys(PANEL_LABELS) as Panel[]).map((k) => {
-              const Icon = PANEL_LABELS[k].icon;
-              const active = panel === k;
-              return (
-                <button key={k} onClick={() => setPanel(k)} data-testid={`nav-${k}`}
-                  className={`w-full flex items-center gap-2.5 rounded-md px-3 py-2 text-sm hover-elevate active-elevate-2 text-left ${
-                    active ? "bg-primary/10 text-primary font-medium" : "text-foreground/80"
-                  }`}>
-                  <Icon className="h-4 w-4 shrink-0" />
-                  <span className="truncate">{PANEL_LABELS[k].label}</span>
-                  {k === "citations" && <span className="ml-auto text-[10px] font-mono text-muted-foreground shrink-0">{found.length}</span>}
-                  {k === "editor" && issues.length > 0 && <span className="ml-auto text-[10px] font-mono text-muted-foreground shrink-0">{issues.length}</span>}
-                </button>
-              );
-            })}
-          </nav>
-          <div className="mt-4 px-3 pb-2 shrink-0">
-            <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono mb-1.5">Легенда</div>
-            <div className="space-y-1">
-              {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([t, l]) => (
-                <div key={t} className="flex items-center gap-1.5 text-[11px] text-foreground/75">
-                  <span className={`legend-dot ${legendDotClass(t)} shrink-0`} />
-                  <span className="truncate">{l}</span>
-                </div>
-              ))}
-              <div className="flex items-center gap-1.5 text-[11px] text-foreground/75">
-                <span className="legend-dot legend-dot-issue shrink-0" />
-                <span className="truncate">Замечание редактуры</span>
-              </div>
-            </div>
-          </div>
-          <div className="mt-auto p-3 text-[11px] text-muted-foreground leading-snug border-t shrink-0">
-            Прототип. Преобразования эвристические — проверяйте вручную.
-          </div>
-        </aside>
-
-        {/* ── Sidebar resize handle ─────────────────────────────────────────── */}
-        <div
-          onMouseDown={sidebar.onMouseDown}
-          className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
-          title="Потяните, чтобы изменить ширину"
-        />
-
-        {/* ── Workspace ─────────────────────────────────────────────────────── */}
-        <main className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
-          <section className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
-            <div className="h-10 border-b flex items-center px-4 gap-3 shrink-0 bg-muted/30">
-              <AlignLeft className="h-4 w-4 text-muted-foreground" />
-              <span className="text-[13px] text-muted-foreground font-medium">
-                {preview ? `ПРЕДПРОСМОТР → ${preview.target}` : editMode ? "РЕДАКТИРОВАНИЕ" : "ПРОСМОТР"}
-              </span>
-              {warnings.length > 0 && (
-                <div className="flex items-center gap-1 text-[11px] text-warning ml-2">
-                  <AlertTriangle className="h-3.5 w-3.5" />
-                  {warnings[0]}
-                </div>
-              )}
-              {!preview && !editMode && (
-                <Button variant="ghost" size="sm" className="ml-auto h-7 text-[12px]" onClick={() => setEditMode(true)} data-testid="button-edit">
-                  <Pencil className="h-3.5 w-3.5 mr-1" />Редактировать
-                </Button>
-              )}
-              {editMode && (
-                <div className="ml-auto flex gap-1.5">
-                  <Button size="sm" onClick={() => { setText(draft); setEditMode(false); setSelected(null); setPreview(null); setAiFound(null); toast({ title: "Изменения сохранены" }); }} data-testid="button-save-edit">
-                    <Save className="h-3.5 w-3.5 mr-1" />Сохранить
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => { setDraft(text); setEditMode(false); }} data-testid="button-cancel-edit">
-                    <RotateCcw className="h-3.5 w-3.5 mr-1" />Отменить
-                  </Button>
-                </div>
-              )}
-              {preview && (
-                <div className="ml-auto flex gap-1.5">
-                  <Button size="sm" onClick={applyConversion} data-testid="button-apply-preview">
-                    <CheckCircle2 className="h-3.5 w-3.5 mr-1" />Применить
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => setPreview(null)} data-testid="button-discard-preview">
-                    <RotateCcw className="h-3.5 w-3.5 mr-1" />Отменить
-                  </Button>
-                </div>
-              )}
-            </div>
-            <ScrollArea className="flex-1 min-h-0">
-              {editMode ? (
-                <RichEditor draft={draft} onChange={setDraft} />
-              ) : (
-                <DocumentView
-                  text={currentText}
-                  annotations={found}
-                  issues={editMode ? [] : issues}
-                  selected={selected}
-                  hoveredId={hoveredId}
-                  onAnnotationClick={(item) => { setSelected({ start: item.start, end: item.end }); setPanel("citations"); }}
-                />
-              )}
-            </ScrollArea>
-          </section>
-
-          {/* ── Right panel resize handle ─────────────────────────────────── */}
-          <div
-            onMouseDown={rightPanel.onMouseDown}
-            className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors border-l"
-            title="Потяните, чтобы изменить ширину"
-          />
-
-          <section
-            className="shrink-0 flex flex-col min-h-0 overflow-hidden"
-            style={{ width: rightPanel.width }}
-            data-testid="right-panel"
-          >
-            <div className="h-10 border-b flex items-center px-4 shrink-0 bg-muted/30">
-              <Type className="h-4 w-4 text-muted-foreground mr-2 shrink-0" />
-              <span className="text-[13px] text-muted-foreground font-medium uppercase tracking-wide truncate">{PANEL_LABELS[panel].label}</span>
-            </div>
-            <ScrollArea className="flex-1 min-h-0">
-              <div className="p-4">
-                {panel === "citations" && <CitationsPanel items={filteredFound} total={found.length}
-                  search={search} setSearch={setSearch}
-                  typeFilter={typeFilter} setTypeFilter={setTypeFilter}
-                  onSelect={(item) => setSelected({ start: item.start, end: item.end })}
-                  onHover={setHoveredId} />}
-                {panel === "style" && <StylePanel detected={detected} />}
-                {panel === "convert" && (
-                  <ConvertPanel
-                    detected={detected} text={text}
-                    customRules={customRules} setCustomRules={setCustomRules}
-                    previewActive={!!preview} applyPreview={applyConversion}
-                    onDiscard={() => setPreview(null)}
-                    onRun={(target, converted) => setPreview({ target, text: converted })}
-                    aiData={aiData}
-                    aiLoading={aiLoading}
-                    aiTargetStyle={aiTargetStyle}
-                    onAiConvert={(target) => handleAiAnalyze(target)}
-                  />
+          <nav className="flex flex-col gap-1 p-2 flex-1">
+            {(Object.entries(PANEL_LABELS) as [Panel, { label: string; icon: typeof FileText }][]).map(([key, { label, icon: Icon }]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setPanel(key)}
+                className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm w-full text-left transition-colors ${
+                  panel === key
+                    ? "bg-primary text-primary-foreground"
+                    : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                <span className="truncate">{label}</span>
+                {key === "citations" && found.length > 0 && (
+                  <Badge variant="secondary" className="ml-auto text-[10px] px-1.5 shrink-0">{found.length}</Badge>
                 )}
-                {panel === "structure" && <StructurePanel structure={structure} onJump={() => {}} />}
-                {panel === "editor" && <EditorPanel issues={issues} onSelect={(i) => { setSelected({ start: i.start, end: i.end }); }} />}
-                {panel === "stats" && <StatsPanel stats={stats} found={found} issues={issues} detected={detected} />}
-              </div>
-            </ScrollArea>
-          </section>
-        </main>
-      </div>
-    </div>
-  );
-}
-
-// ── DocumentView ──────────────────────────────────────────────────────────────
-function DocumentView({ text, annotations, issues, selected, hoveredId, onAnnotationClick }: {
-  text: string;
-  annotations: FoundItem[];
-  issues: EditorIssue[];
-  selected: { start: number; end: number } | null;
-  hoveredId: string | null;
-  onAnnotationClick: (item: FoundItem) => void;
-}) {
-  type Ann = { id: string; start: number; end: number; kind: "citation" | "issue"; type: string };
-  type Seg = { text: string; ann: Ann | null; isSelected: boolean };
-
-  const merged: Ann[] = useMemo(() => [
-    ...annotations.map((a) => ({ id: a.id, start: a.start, end: a.end, kind: "citation" as const, type: a.type })),
-    ...issues.map((i) => ({ id: i.id, start: i.start, end: i.end, kind: "issue" as const, type: i.type })),
-  ].sort((a, b) => a.start - b.start), [annotations, issues]);
-
-  const segments: Seg[] = useMemo(() => {
-    const segs: Seg[] = [];
-    let cursor = 0;
-    for (const ann of merged) {
-      if (ann.start > cursor) segs.push({ text: text.slice(cursor, ann.start), ann: null, isSelected: false });
-      if (ann.end > ann.start) {
-        segs.push({ text: text.slice(ann.start, ann.end), ann, isSelected: !!selected && selected.start === ann.start && selected.end === ann.end });
-      }
-      cursor = Math.max(cursor, ann.end);
-    }
-    if (cursor < text.length) segs.push({ text: text.slice(cursor), ann: null, isSelected: false });
-    return segs;
-  }, [text, merged, selected]);
-
-  const paragraphs: Seg[][] = useMemo(() => {
-    const result: Seg[][] = [];
-    let current: Seg[] = [];
-    for (const seg of segments) {
-      for (const part of seg.text.split(/(\n)/)) {
-        if (part === "\n") { result.push(current); current = []; }
-        else if (part) current.push({ ...seg, text: part });
-      }
-    }
-    if (current.length) result.push(current);
-    return result;
-  }, [segments]);
-
-  return (
-    <div className="p-6 font-serif text-[14.5px] leading-[1.85] text-foreground/90 max-w-3xl mx-auto" data-testid="document-view">
-      {paragraphs.map((para, pi) => (
-        <p key={pi} className="mb-[0.6em]">
-          {para.map((seg, si) => {
-            if (!seg.ann) return <span key={si}>{seg.text}</span>;
-            const cls = annotationCSSClass(seg.ann.kind, seg.ann.type);
-            return (
-              <mark key={si}
-                className={`${cls} cursor-pointer rounded-[2px] px-[1px] transition-all ${
-                  seg.isSelected ? "ring-2 ring-primary/60" : ""
-                } ${hoveredId === seg.ann.id ? "brightness-90" : ""}`}
-                onClick={() => seg.ann && onAnnotationClick(seg.ann as unknown as FoundItem)}
-                title={seg.ann.type}>
-                {seg.text}
-              </mark>
-            );
-          })}
-        </p>
-      ))}
-    </div>
-  );
-}
-
-// ── RichEditor ────────────────────────────────────────────────────────────────
-function RichEditor({ draft, onChange }: { draft: string; onChange: (v: string) => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const lastDraft = useRef(draft);
-
-  useEffect(() => {
-    if (ref.current && draft !== lastDraft.current) {
-      ref.current.innerHTML = draftToHtml(draft);
-      lastDraft.current = draft;
-    }
-  }, [draft]);
-
-  useEffect(() => {
-    if (ref.current) ref.current.innerHTML = draftToHtml(draft);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function handleInput() {
-    if (!ref.current) return;
-    const plain = htmlToPlain(ref.current.innerHTML);
-    lastDraft.current = plain;
-    onChange(plain);
-  }
-
-  function execCmd(cmd: string, value?: string) {
-    document.execCommand(cmd, false, value);
-    ref.current?.focus();
-  }
-
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center gap-1 px-4 py-2 border-b bg-muted/20 flex-wrap">
-        {([
-          { icon: Bold,          cmd: "bold",      title: "Жирный (Ctrl+B)" },
-          { icon: Italic,        cmd: "italic",    title: "Курсив (Ctrl+I)" },
-          { icon: UnderlineIcon, cmd: "underline", title: "Подчёркнутый (Ctrl+U)" },
-        ] as { icon: typeof Bold; cmd: string; title: string }[]).map(({ icon: Icon, cmd, title }) => (
-          <button key={cmd} type="button" title={title}
-            onMouseDown={(e) => { e.preventDefault(); execCmd(cmd); }}
-            className="p-1.5 rounded hover:bg-accent text-foreground/70">
-            <Icon className="h-3.5 w-3.5" />
-          </button>
-        ))}
-        <span className="w-px h-5 bg-border mx-0.5" />
-        <button type="button" title="Маркированный список"
-          onMouseDown={(e) => { e.preventDefault(); execCmd("insertUnorderedList"); }}
-          className="p-1.5 rounded hover:bg-accent text-foreground/70">
-          <List className="h-3.5 w-3.5" />
-        </button>
-        <button type="button" title="Нумерованный список"
-          onMouseDown={(e) => { e.preventDefault(); execCmd("insertOrderedList"); }}
-          className="p-1.5 rounded hover:bg-accent text-foreground/70 font-mono font-bold text-[11px] w-6 h-6 flex items-center justify-center leading-none">
-          1.
-        </button>
-        <span className="w-px h-5 bg-border mx-0.5" />
-        <button type="button" title="Заголовок (H2)"
-          onMouseDown={(e) => { e.preventDefault(); execCmd("formatBlock", "<h2>"); }}
-          className="p-1.5 rounded hover:bg-accent text-foreground/70 font-bold text-[11px] w-6 h-6 flex items-center justify-center leading-none">
-          H
-        </button>
-        <button type="button" title="Обычный абзац"
-          onMouseDown={(e) => { e.preventDefault(); execCmd("formatBlock", "<div>"); }}
-          className="p-1.5 rounded hover:bg-accent text-foreground/70 text-[11px] w-6 h-6 flex items-center justify-center leading-none">
-          ¶
-        </button>
-        <span className="w-px h-5 bg-border mx-0.5" />
-        <button type="button" title="Очистить форматирование"
-          onMouseDown={(e) => { e.preventDefault(); execCmd("removeFormat"); }}
-          className="p-1.5 rounded hover:bg-accent text-foreground/70 font-mono text-[10px] px-1.5">
-          Aa
-        </button>
-      </div>
-      <div
-        ref={ref}
-        contentEditable
-        suppressContentEditableWarning
-        onInput={handleInput}
-        spellCheck
-        className="flex-1 p-6 font-serif text-[14.5px] leading-[1.85] outline-none overflow-auto rich-editor"
-        data-testid="rich-editor"
-      />
-    </div>
-  );
-}
-
-function draftToHtml(plain: string): string {
-  return plain.split("\n").map((line) => `<div>${escHtml(line) || "<br>"}</div>`).join("");
-}
-
-function htmlToPlain(html: string): string {
-  return html
-    .replace(/<div><br><\/div>/gi, "\n")
-    .replace(/<\/(div|p|li)>/gi, "\n")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
-    .replace(/\n{3,}/g, "\n\n").trim();
-}
-
-function escHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-// ── Panel helpers ─────────────────────────────────────────────────────────────
-function PanelHeader({ title, hint }: { title: string; hint?: string }) {
-  return (
-    <div className="mb-3">
-      <div className="text-[13px] font-semibold text-foreground">{title}</div>
-      {hint && <div className="text-[11px] text-muted-foreground mt-0.5 leading-snug">{hint}</div>}
-    </div>
-  );
-}
-
-function CitationsPanel({ items, total, search, setSearch, typeFilter, setTypeFilter, onSelect, onHover }: {
-  items: FoundItem[]; total: number; search: string; setSearch: (v: string) => void;
-  typeFilter: string; setTypeFilter: (v: string) => void;
-  onSelect: (item: FoundItem) => void; onHover: (id: string | null) => void;
-}) {
-  return (
-    <div className="space-y-3">
-      <PanelHeader title="Цитаты и сноски" hint={`Найдено: ${total}. Нажмите на элемент, чтобы выделить его в тексте.`} />
-      <div className="flex gap-2">
-        <div className="relative flex-1 min-w-0">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-          <Input value={search} onChange={(e) => setSearch(e.target.value)}
-            placeholder="Поиск…" className="pl-8 h-8 text-[13px]" data-testid="input-search-citations" />
-        </div>
-        <Select value={typeFilter} onValueChange={setTypeFilter}>
-          <SelectTrigger className="h-8 w-[120px] shrink-0 text-[12px]" data-testid="select-filter-type"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">Все типы</SelectItem>
-            {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([k, v]) => (
-              <SelectItem key={k} value={k}>{v}</SelectItem>
+                {key === "editor" && issues.length > 0 && (
+                  <Badge variant="destructive" className="ml-auto text-[10px] px-1.5 shrink-0">{issues.length}</Badge>
+                )}
+              </button>
             ))}
-          </SelectContent>
-        </Select>
-      </div>
-      {items.length === 0 ? (
-        <div className="text-[13px] text-muted-foreground text-center py-8">Ничего не найдено.</div>
-      ) : (
-        <div className="space-y-1.5">
-          {items.map((item) => (
-            <button key={item.id} onClick={() => onSelect(item)} onMouseEnter={() => onHover(item.id)} onMouseLeave={() => onHover(null)}
-              className="w-full text-left rounded-md border px-3 py-2 text-[12.5px] hover:bg-accent/50 transition-colors" data-testid="citation-item">
-              <div className="flex items-center gap-2 mb-1">
-                <span className={`legend-dot ${legendDotClass(item.type)} shrink-0`} />
-                <span className="font-medium text-[11px] uppercase tracking-wide text-muted-foreground truncate">{TYPE_LABELS[item.type]}</span>
-                <span className="ml-auto text-[10px] text-muted-foreground font-mono shrink-0">стр. {item.line}</span>
-              </div>
-              <div className="text-foreground/80 leading-snug line-clamp-2">{item.text}</div>
-              {item.note && <div className="text-muted-foreground text-[11px] mt-0.5">{item.note}</div>}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+          </nav>
 
-function StylePanel({ detected }: { detected: ReturnType<typeof detectStyle> }) {
-  return (
-    <div className="space-y-4">
-      <PanelHeader title="Стиль цитирования" hint="Автоматическое определение стиля по образцам." />
-      <div className="rounded-lg border p-4 bg-muted/20 space-y-3">
-        <div className="flex items-center justify-between">
-          <span className="text-[13px] font-semibold">{detected.style}</span>
-          <Badge variant={detected.confidence > 0.6 ? "default" : "secondary"} className="text-[10px]">
-            {Math.round(detected.confidence * 100)}%
-          </Badge>
-        </div>
-        <div className="space-y-2">
-          {detected.scores.slice(0, 5).map(({ style, score }) => (
-            <Score key={style} label={style} value={score} />
-          ))}
-        </div>
-        {detected.notes.length > 0 && (
-          <div className="text-[11px] text-muted-foreground space-y-0.5 pt-1 border-t">
-            {detected.notes.map((n, i) => <div key={i}>• {n}</div>)}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Score({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-[12px] w-20 shrink-0 text-foreground/75">{label}</span>
-      <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
-        <div className="h-full bg-primary/60 rounded-full transition-all" style={{ width: `${Math.min(100, value * 100)}%` }} />
-      </div>
-      <span className="text-[11px] text-muted-foreground w-8 text-right shrink-0">{Math.round(value * 100)}%</span>
-    </div>
-  );
-}
-
-function ConvertPanel({ detected, onRun, text, customRules, setCustomRules, previewActive, applyPreview, onDiscard, aiData, aiLoading, aiTargetStyle, onAiConvert }: {
-  detected: ReturnType<typeof detectStyle>;
-  onRun: (target: CitationStyle, converted: string) => void;
-  text: string;
-  customRules: CustomCitationRules;
-  setCustomRules: (r: CustomCitationRules) => void;
-  previewActive: boolean;
-  applyPreview: () => void;
-  onDiscard: () => void;
-  aiData: AiAnalyzeResponse | null;
-  aiLoading: boolean;
-  aiTargetStyle: CitationStyle | null;
-  onAiConvert: (target: CitationStyle) => void;
-}) {
-  const [target, setTarget] = useState<CitationStyle>("APA");
-
-  // AI-конвертация доступна, если результат получен именно для текущего целевого стиля
-  const aiConvertedAvailable =
-    !!aiData?.convertedText && !aiLoading && aiTargetStyle === target;
-
-  const result = useMemo(() => {
-    if (aiConvertedAvailable && aiData!.convertedText) {
-      return {
-        text: aiData!.convertedText,
-        converted: 1,
-        warnings: [] as string[],
-        source: "ai" as const,
-      };
-    }
-    try {
-      const r = convertCitations(text, target, customRules);
-      return { ...r, source: "heuristic" as const };
-    } catch {
-      return {
-        text,
-        converted: 0,
-        warnings: ["Ошибка при конвертации. Проверьте формат документа."],
-        source: "heuristic" as const,
-      };
-    }
-  }, [text, target, customRules, aiConvertedAvailable, aiData]);
-
-  return (
-    <div className="space-y-4">
-      <PanelHeader
-        title="Конвертация стиля"
-        hint="Выберите целевой стиль. AI-конвертация применяет изменения напрямую; эвристика — через предпросмотр."
-      />
-      <div className="space-y-1.5">
-        <Label className="text-[12px]">Целевой стиль</Label>
-        <Select value={target} onValueChange={(v) => setTarget(v as CitationStyle)}>
-          <SelectTrigger className="h-9" data-testid="select-target-style"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {(["APA", "Chicago", "MLA", "IEEE", "Vancouver", "Harvard", "GOST", "Custom"] as CitationStyle[]).map((s) => (
-              <SelectItem key={s} value={s}>{s}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-
-      {target === "Custom" && (
-        <div className="space-y-2 rounded-lg border p-3 bg-muted/20">
-          <div className="text-[12px] font-medium mb-1">Пользовательский стиль</div>
-          {[
-            { label: "Название", key: "name" },
-            { label: "Шаблон вставки", key: "inlineTemplate" },
-            { label: "Шаблон библиографии", key: "bibliographyTemplate" },
-            { label: "Шаблон сноски", key: "footnoteTemplate" },
-            { label: "Разделитель", key: "separator" },
-          ].map(({ label, key }) => (
-            <div key={key} className="space-y-0.5">
-              <Label className="text-[11px] text-muted-foreground">{label}</Label>
-              <Input value={(customRules as Record<string, string>)[key]} onChange={(e) => setCustomRules({ ...customRules, [key]: e.target.value })}
-                className="h-7 text-[12px] font-mono" />
-            </div>
-          ))}
-          <div className="space-y-0.5">
-            <Label className="text-[11px] text-muted-foreground">Режим</Label>
-            <Select value={customRules.mode} onValueChange={(v) => setCustomRules({ ...customRules, mode: v as CustomCitationRules["mode"] })}>
-              <SelectTrigger className="h-7 text-[12px]"><SelectValue /></SelectTrigger>
+          {/* Demo selector — at the bottom of the sidebar */}
+          <div className="p-2 border-t">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide px-1 mb-1.5">Демо-документы</p>
+            <Select onValueChange={(v) => loadDemo(v as DemoId)}>
+              <SelectTrigger className="h-8 w-full text-xs" data-testid="select-demo">
+                <SelectValue placeholder="Загрузить демо…" />
+              </SelectTrigger>
               <SelectContent>
-                <SelectItem value="author-date">Автор-год</SelectItem>
-                <SelectItem value="numeric">Числовой</SelectItem>
-                <SelectItem value="footnote">Сноски</SelectItem>
+                {DEMO_DOCS.map((d) => (
+                  <SelectItem key={d.id} value={d.id} className="text-xs">{d.label}</SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
-        </div>
-      )}
 
-      {/* Status block */}
-      <div className="rounded-md border p-3 bg-muted/10 space-y-1.5">
-        <div className="flex items-center justify-between">
-          <span className="text-[12px] font-medium">Статус</span>
-          <div className="flex items-center gap-1.5">
-            {result.source === "ai" && (
-              <Badge variant="default" className="text-[9px] gap-1 py-0">
-                <Sparkles className="h-2.5 w-2.5" />AI
-              </Badge>
-            )}
-            <Badge variant="outline" className="text-[10px]">{result.converted} изменений</Badge>
-          </div>
-        </div>
-        {result.source === "ai" && (
-          <div className="text-[11px] text-muted-foreground">
-            Конвертация выполнена Gemini — проверьте результат вручную.
-          </div>
-        )}
-        {result.source === "heuristic" && result.converted === 0 && (
-          <div className="text-[11px] text-muted-foreground">
-            {target === detected.style
-              ? `ℹ Документ уже в формате ${target}.`
-              : "ℹ Эвристика не нашла замен. Попробуйте AI-конвертацию."}
-          </div>
-        )}
-        {result.warnings.length > 0 && (
-          <div className="text-[11px] text-warning space-y-0.5">
-            {result.warnings.slice(0, 3).map((w, i) => <div key={i}>⚠ {w}</div>)}
-          </div>
-        )}
-      </div>
-
-      {/* Action buttons */}
-      {previewActive ? (
-        <div className="flex gap-2">
-          <Button size="sm" className="flex-1" onClick={applyPreview} data-testid="button-apply-convert">
-            <CheckCircle2 className="h-3.5 w-3.5 mr-1" />Применить
-          </Button>
-          <Button variant="outline" size="sm" onClick={onDiscard} data-testid="button-discard-convert">
-            <RotateCcw className="h-3.5 w-3.5 mr-1" />Отменить
-          </Button>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {/* One-click AI convert — applies text directly, no preview step */}
-          <Button
-            className="w-full"
-            size="sm"
-            variant="default"
-            disabled={aiLoading}
-            onClick={() => onAiConvert(target)}
-            data-testid="button-ai-convert"
-            title="Отправить документ в Gemini для точной конвертации стиля и немедленного применения"
-          >
-            {aiLoading ? (
-              <><RefreshCw className="h-3.5 w-3.5 mr-1.5 animate-spin" />AI конвертирует…</>
-            ) : (
-              <><Zap className="h-3.5 w-3.5 mr-1.5" />Конвертировать через AI → {target}</>
-            )}
-          </Button>
-          {/* Heuristic fallback — keeps preview workflow */}
-          <Button
-            className="w-full"
-            size="sm"
-            variant="outline"
-            onClick={() => onRun(target, result.text)}
-            data-testid="button-run-convert"
-            title="Локальная эвристическая конвертация (без AI, с предпросмотром)"
-          >
-            <RefreshCw className="h-3.5 w-3.5 mr-1.5" />Предпросмотр (эвристика)
-          </Button>
-        </div>
-      )}
-      <Separator />
-      <SourceTypeBuilder />
-    </div>
-  );
-}
-
-// ── StructurePanel — карточки не выходят за экран ─────────────────────────────
-function StructurePanel({ structure, onJump }: { structure: ReturnType<typeof analyzeStructure>; onJump: (line: number) => void }) {
-  const items = [
-    { label: "Параграфов",    value: structure.paragraphs },
-    { label: "Разделов",      value: structure.sections.length },
-    { label: "Сносок",        value: structure.footnoteCount },
-    { label: "Библ. записей", value: structure.bibCount },
-  ];
-
-  return (
-    <div className="space-y-4">
-      <PanelHeader title="Структура документа" hint="Разделы и аннотированные блоки." />
-      {/*
-        grid-cols-2: две колонки по умолчанию.
-        min-w-0 + overflow-hidden на каждой карточке предотвращают выход за пределы панели.
-        break-words + hyphens-auto позволяют длинным подписям переноситься, а не вылезать.
-      */}
-      <div className="grid grid-cols-2 gap-2">
-        {items.map(({ label, value }) => (
+          {/* Resize handle */}
           <div
-            key={label}
-            className="rounded-md border bg-muted/20 px-2 py-2.5 flex flex-col items-center min-w-0 overflow-hidden"
-          >
-            <div className="text-[20px] font-semibold tabular-nums leading-none mb-1">
-              {value}
-            </div>
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide leading-tight text-center w-full break-words hyphens-auto">
-              {label}
-            </div>
-          </div>
-        ))}
-      </div>
-      {structure.sections.length > 0 && (
-        <div>
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono mb-2">Разделы</div>
-          <div className="space-y-0.5">
-            {structure.sections.map((s, i) => (
-              <button
-                key={i}
-                onClick={() => onJump(s.line)}
-                className="w-full text-left text-[12px] px-2 py-1.5 rounded hover:bg-accent/50 transition-colors flex items-baseline gap-2 min-w-0"
-              >
-                <span className="text-muted-foreground font-mono text-[10px] w-5 shrink-0">{s.line}</span>
-                <span className="truncate flex-1 min-w-0">{s.text}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+            className="absolute top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/30 transition-colors"
+            style={{ left: sidebar.width - 1 }}
+            onMouseDown={sidebar.onMouseDown}
+          />
+        </aside>
 
-function Metric({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="flex items-center justify-between py-1.5 border-b last:border-0">
-      <span className="text-[12.5px] text-foreground/75">{label}</span>
-      <span className="text-[13px] font-semibold tabular-nums">{value}</span>
-    </div>
-  );
-}
-
-function EditorPanel({ issues, onSelect }: { issues: EditorIssue[]; onSelect: (i: EditorIssue) => void }) {
-  const [filter, setFilter] = useState("all");
-  const filtered = filter === "all" ? issues : issues.filter((i) => i.type === filter);
-  return (
-    <div className="space-y-3">
-      <PanelHeader title="Редактура" hint="Автоматические стилистические замечания." />
-      <Select value={filter} onValueChange={setFilter}>
-        <SelectTrigger className="h-8 text-[12px]"><SelectValue /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">Все ({issues.length})</SelectItem>
-          {(Object.entries(ISSUE_LABELS) as [EditorIssue["type"], string][]).map(([k, v]) => {
-            const cnt = issues.filter((i) => i.type === k).length;
-            return cnt > 0 ? <SelectItem key={k} value={k}>{v} ({cnt})</SelectItem> : null;
-          })}
-        </SelectContent>
-      </Select>
-      {filtered.length === 0 ? (
-        <div className="text-[13px] text-muted-foreground text-center py-8">Замечаний не обнаружено.</div>
-      ) : (
-        <div className="space-y-1.5">
-          {filtered.map((issue) => (
-            <button key={issue.id} onClick={() => onSelect(issue)}
-              className="w-full text-left rounded-md border px-3 py-2 text-[12.5px] hover:bg-accent/50 transition-colors" data-testid="issue-item">
-              <div className="flex items-center gap-2 mb-0.5">
-                <AlertTriangle className="h-3 w-3 text-warning shrink-0" />
-                <span className="font-medium text-[11px] uppercase tracking-wide text-muted-foreground truncate">{ISSUE_LABELS[issue.type]}</span>
-                <span className="ml-auto text-[10px] text-muted-foreground font-mono shrink-0">стр. {issue.line}</span>
+        {/* ── Document editor ───────────────────────────────────────────────── */}
+        <main className="flex-1 flex flex-col min-w-0 relative">
+          {/* Toolbar */}
+          {editMode && (
+            <div className="h-9 border-b flex items-center gap-1 px-3 bg-muted/20 shrink-0">
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("bold")}><Bold className="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("italic")}><Italic className="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("underline")}><UnderlineIcon className="h-3.5 w-3.5" /></Button>
+              <Separator orientation="vertical" className="h-4 mx-1" />
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("insertUnorderedList")}><List className="h-3.5 w-3.5" /></Button>
+              <div className="ml-auto flex items-center gap-1">
+                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => { setDraft(text); setEditMode(false); }}>
+                  <RotateCcw className="h-3 w-3 mr-1" />Отмена
+                </Button>
+                <Button size="sm" className="h-7 text-xs" onClick={() => { setText(draft); setEditMode(false); toast({ title: "Изменения сохранены" }); }}>
+                  <Save className="h-3.5 w-3.5 mr-1" />Сохранить
+                </Button>
               </div>
-              <div className="text-foreground/80 leading-snug line-clamp-2">{issue.text}</div>
-              {issue.suggestion && <div className="text-primary/70 text-[11px] mt-0.5">→ {issue.suggestion}</div>}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StatsPanel({ stats, found, issues, detected }: {
-  stats: { words: number; charsWithSpaces: number; charsNoSpaces: number; paragraphs: number; lines: number; readingMinutes: number };
-  found: FoundItem[]; issues: EditorIssue[]; detected: ReturnType<typeof detectStyle>;
-}) {
-  return (
-    <div className="space-y-4">
-      <PanelHeader title="Статистика документа" />
-      <div className="space-y-0">
-        <Metric label="Слов"                 value={stats.words.toLocaleString("ru")} />
-        <Metric label="Знаков (с пробелами)"  value={stats.charsWithSpaces.toLocaleString("ru")} />
-        <Metric label="Знаков (без пробелов)" value={stats.charsNoSpaces.toLocaleString("ru")} />
-        <Metric label="Параграфов"           value={stats.paragraphs} />
-        <Metric label="Строк"                value={stats.lines} />
-        <Metric label="Время чтения"         value={`~${stats.readingMinutes} мин.`} />
-        <Metric label="Цитат и сносок"       value={found.length} />
-        <Metric label="Замечаний редактуры"  value={issues.length} />
-        <Metric label="Определённый стиль"   value={detected.style} />
-      </div>
-    </div>
-  );
-}
-
-function SourceTypeBuilder() {
-  const [selectedType, setSelectedType] = useState<string>(DEFAULT_SOURCE_TYPES[0].id);
-  const [fields, setFields] = useState<Record<string, string>>({});
-  const template = DEFAULT_SOURCE_TYPES.find((t) => t.id === selectedType) as SourceTypeTemplate | undefined;
-  const previewText = template ? renderSourceTemplate(template, fields) : "";
-  return (
-    <div className="space-y-3">
-      <div className="text-[12px] font-semibold text-foreground">Конструктор источника</div>
-      <Select value={selectedType} onValueChange={(v) => { setSelectedType(v); setFields({}); }}>
-        <SelectTrigger className="h-8 text-[12px]"><SelectValue /></SelectTrigger>
-        <SelectContent>{DEFAULT_SOURCE_TYPES.map((t) => <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>)}</SelectContent>
-      </Select>
-      {template && (
-        <div className="space-y-1.5">
-          {template.fields.map((field) => (
-            <div key={field} className="space-y-0.5">
-              <Label className="text-[11px] text-muted-foreground">{SOURCE_TYPE_FIELD_LABELS[field] ?? field}</Label>
-              <Input value={fields[field] ?? ""} onChange={(e) => setFields((prev) => ({ ...prev, [field]: e.target.value }))}
-                className="h-7 text-[12px]" placeholder={SOURCE_TYPE_FIELD_LABELS[field] ?? field} />
-            </div>
-          ))}
-          {previewText && (
-            <div className="rounded-md border p-2.5 bg-muted/20 mt-2">
-              <div className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Предпросмотр APA</div>
-              <div className="text-[12.5px] font-serif leading-snug">{previewText}</div>
             </div>
           )}
+
+          {/* Preview banner */}
+          {preview && (
+            <div className="h-9 border-b flex items-center gap-3 px-4 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 text-sm shrink-0">
+              <RefreshCw className="h-4 w-4" />
+              <span>Предпросмотр конвертации в <strong>{preview.target}</strong></span>
+              <div className="ml-auto flex gap-2">
+                <Button size="sm" variant="outline" className="h-7 text-xs border-amber-400" onClick={() => setPreview(null)}>Отмена</Button>
+                <Button size="sm" className="h-7 text-xs bg-amber-600 hover:bg-amber-700 text-white" onClick={applyConversion}><CheckCircle2 className="h-3.5 w-3.5 mr-1" />Применить</Button>
+              </div>
+            </div>
+          )}
+
+          <ScrollArea className="flex-1">
+            <div
+              className={`p-6 min-h-full font-mono text-sm leading-relaxed outline-none whitespace-pre-wrap ${
+                editMode ? "cursor-text" : ""
+              } ${
+                preview ? "opacity-90" : ""
+              }`}
+              contentEditable={editMode}
+              suppressContentEditableWarning
+              onInput={(e) => setDraft((e.target as HTMLDivElement).innerText)}
+              data-testid="document-area"
+            >
+              {currentText}
+            </div>
+          </ScrollArea>
+
+          {/* Edit mode toggle */}
+          {!editMode && (
+            <button
+              type="button"
+              className="absolute bottom-4 right-4 h-9 w-9 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center hover:bg-primary/90 transition-colors"
+              onClick={() => setEditMode(true)}
+              title="Редактировать документ"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+          )}
+        </main>
+
+        {/* ── Right panel ───────────────────────────────────────────────────── */}
+        <div
+          className="flex flex-col border-l bg-background shrink-0 relative"
+          style={{ width: rightPanel.width }}
+          data-testid="right-panel"
+        >
+          {/* Resize handle */}
+          <div
+            className="absolute top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/30 transition-colors z-10"
+            style={{ left: 0 }}
+            onMouseDown={rightPanel.onMouseDown}
+          />
+
+          <ScrollArea className="flex-1">
+            <div className="p-4">
+              {/* ── Structure panel ─────────────────────────────────────── */}
+              {panel === "structure" && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">Структура документа</h2>
+                    <Badge variant="outline" className="text-[10px]">{structure.sections.length} разд.</Badge>
+                  </div>
+
+                  {/* Language + paragraph count */}
+                  <div className="flex gap-2">
+                    <Badge variant="secondary" className="text-[10px] gap-1">
+                      <Type className="h-3 w-3" />{structure.language === "ru" ? "RU" : structure.language === "en" ? "EN" : "RU+EN"}
+                    </Badge>
+                    <Badge variant="secondary" className="text-[10px] gap-1">
+                      <AlignLeft className="h-3 w-3" />{structure.paragraphs} абз.
+                    </Badge>
+                  </div>
+
+                  {/* Sections list */}
+                  {structure.sections.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">Разделы не обнаружены.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {structure.sections.map((sec, i) => (
+                        <div
+                          key={i}
+                          className="flex items-start gap-2 p-2 rounded-md hover:bg-muted/50 cursor-pointer transition-colors group"
+                          style={{ paddingLeft: `${(sec.level ?? 1) * 0.5 + 0.5}rem` }}
+                        >
+                          <span className="text-[10px] text-muted-foreground mt-0.5 shrink-0 w-4 text-right">{sec.level ?? 1}</span>
+                          <span className="text-xs leading-snug break-words min-w-0 flex-1">{sec.heading}</span>
+                          <span className="text-[10px] text-muted-foreground shrink-0 ml-auto">{sec.startLine}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* AI structure hint */}
+                  {!aiData && (
+                    <p className="text-[11px] text-muted-foreground pt-1">
+                      Запустите <span className="font-medium">AI-анализ</span> для уточнённого распознавания разделов.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* ── Citations panel ─────────────────────────────────────── */}
+              {panel === "citations" && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">Цитаты и сноски</h2>
+                    <Badge variant="outline" className="text-[10px]">{found.length}</Badge>
+                  </div>
+
+                  {/* Search */}
+                  <div className="relative">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                    <Input
+                      placeholder="Поиск…"
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      className="pl-8 h-8 text-xs"
+                    />
+                  </div>
+
+                  {/* Type filter */}
+                  <Select value={typeFilter} onValueChange={setTypeFilter}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Все типы</SelectItem>
+                      {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([type, label]) => (
+                        <SelectItem key={type} value={type}>{label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  {/* Legend */}
+                  <div className="flex flex-wrap gap-x-3 gap-y-1">
+                    {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([type, label]) => (
+                      <span key={type} className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${legendDotClass(type)}`} />
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+
+                  {/* List */}
+                  {filteredFound.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">Ничего не найдено.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {filteredFound.map((item) => (
+                        <div
+                          key={item.id}
+                          className={`p-2 rounded-md border text-xs cursor-pointer transition-colors ${
+                            selected?.start === item.start
+                              ? "border-primary bg-primary/5"
+                              : hoveredId === item.id
+                              ? "border-muted-foreground/40 bg-muted/40"
+                              : "border-transparent hover:border-muted-foreground/20 hover:bg-muted/20"
+                          }`}
+                          onMouseEnter={() => setHoveredId(item.id)}
+                          onMouseLeave={() => setHoveredId(null)}
+                          onClick={() => setSelected({ start: item.start, end: item.end })}
+                        >
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <span className={`w-2 h-2 rounded-full shrink-0 ${legendDotClass(item.type)}`} />
+                            <span className="font-medium text-[10px] uppercase tracking-wide text-muted-foreground">{TYPE_LABELS[item.type]}</span>
+                            {item.confidence !== undefined && (
+                              <span className="ml-auto text-[10px] text-muted-foreground">{Math.round(item.confidence * 100)}%</span>
+                            )}
+                          </div>
+                          <p className="truncate">{item.text}</p>
+                          {item.note && <p className="text-muted-foreground truncate">{item.note}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Style panel ─────────────────────────────────────────── */}
+              {panel === "style" && (
+                <div className="space-y-4">
+                  <h2 className="text-sm font-semibold">Стиль цитирования</h2>
+                  <div className="p-3 rounded-lg bg-muted/50 space-y-1">
+                    <p className="text-xs text-muted-foreground">Обнаруженный стиль</p>
+                    <p className="text-sm font-semibold">{detected.style}</p>
+                    <p className="text-xs text-muted-foreground">Уверенность: {Math.round(detected.confidence * 100)}%</p>
+                  </div>
+                  {detected.notes.length > 0 && (
+                    <div className="space-y-1">
+                      {detected.notes.map((n, i) => (
+                        <p key={i} className="text-xs text-muted-foreground flex gap-1.5">
+                          <span className="text-primary mt-0.5">•</span>{n}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Convert panel ───────────────────────────────────────── */}
+              {panel === "convert" && (
+                <div className="space-y-4">
+                  <h2 className="text-sm font-semibold">Конвертация</h2>
+
+                  {/* Heuristic conversion */}
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">Эвристическая</p>
+                    <div className="flex gap-2">
+                      <Select
+                        onValueChange={(v) => {
+                          const result = convertCitations(text, v as CitationStyle);
+                          setPreview({ target: v as CitationStyle, text: result });
+                        }}
+                      >
+                        <SelectTrigger className="h-8 text-xs flex-1"><SelectValue placeholder="Выберите стиль…" /></SelectTrigger>
+                        <SelectContent>
+                          {(["APA", "Chicago", "MLA", "IEEE", "Vancouver", "Harvard", "GOST"] as CitationStyle[]).map((s) => (
+                            <SelectItem key={s} value={s}>{s}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {preview && (
+                      <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                        Предпросмотр активен — подтвердите в документе.
+                      </p>
+                    )}
+                  </div>
+
+                  <Separator />
+
+                  {/* AI conversion */}
+                  <div className="space-y-3">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">AI-конвертация (Gemini)</p>
+
+                    {/* Target style */}
+                    <div className="space-y-1">
+                      <Label className="text-xs">Целевой стиль</Label>
+                      <Select value={convertTargetStyle} onValueChange={(v) => setConvertTargetStyle(v as CitationStyle)}>
+                        <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {(["APA", "Chicago", "MLA", "IEEE", "Vancouver", "Harvard", "GOST"] as CitationStyle[]).map((s) => (
+                            <SelectItem key={s} value={s}>{s}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {/* Scope checkboxes */}
+                    <div className="space-y-1">
+                      <Label className="text-xs">Что конвертировать</Label>
+                      <div className="space-y-1.5">
+                        {CONVERT_SCOPE_OPTIONS.map((opt) => (
+                          <div key={opt.id} className="flex items-start gap-2">
+                            <Checkbox
+                              id={`scope-${opt.id}`}
+                              checked={convertScope.includes(opt.id)}
+                              onCheckedChange={() => toggleScope(opt.id)}
+                              className="mt-0.5"
+                            />
+                            <label htmlFor={`scope-${opt.id}`} className="text-xs cursor-pointer">
+                              <span className="font-medium">{opt.label}</span>
+                              <span className="text-muted-foreground"> — {opt.description}</span>
+                            </label>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <Button
+                      size="sm"
+                      className="w-full h-8 text-xs"
+                      onClick={handleAiConvert}
+                      disabled={aiConvertLoading || !text.trim() || convertScope.length === 0}
+                      data-testid="button-ai-convert"
+                    >
+                      <Zap className="h-3.5 w-3.5 mr-1.5" />
+                      {aiConvertLoading ? "Конвертация…" : `AI-конвертация (${convertScope.length})`}
+                    </Button>
+                    <p className="text-[10px] text-muted-foreground">
+                      Gemini переформатирует выбранные блоки. Результат применяется к документу — проверьте вручную.
+                    </p>
+                  </div>
+
+                  <Separator />
+
+                  {/* Custom rules */}
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">Авторский шаблон</p>
+                    <div className="space-y-1.5">
+                      <div>
+                        <Label className="text-[10px]">Название стиля</Label>
+                        <Input className="h-7 text-xs mt-0.5" value={customRules.name} onChange={(e) => setCustomRules((r) => ({ ...r, name: e.target.value }))} />
+                      </div>
+                      <div>
+                        <Label className="text-[10px]">Шаблон вставки</Label>
+                        <Input className="h-7 text-xs mt-0.5 font-mono" value={customRules.inlineTemplate} onChange={(e) => setCustomRules((r) => ({ ...r, inlineTemplate: e.target.value }))} />
+                      </div>
+                      <div>
+                        <Label className="text-[10px]">Шаблон библиографии</Label>
+                        <Input className="h-7 text-xs mt-0.5 font-mono" value={customRules.bibliographyTemplate} onChange={(e) => setCustomRules((r) => ({ ...r, bibliographyTemplate: e.target.value }))} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Editor panel ────────────────────────────────────────── */}
+              {panel === "editor" && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">Редактура</h2>
+                    <Badge variant={issues.length > 0 ? "destructive" : "secondary"} className="text-[10px]">{issues.length}</Badge>
+                  </div>
+                  {issues.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">Замечаний не найдено.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {issues.map((issue, i) => (
+                        <div
+                          key={i}
+                          className="p-2 rounded-md border border-transparent hover:border-destructive/30 hover:bg-destructive/5 cursor-pointer transition-colors"
+                          onClick={() => setSelected({ start: issue.start, end: issue.end })}
+                        >
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />
+                            <span className="text-[10px] uppercase tracking-wide font-medium text-destructive">{ISSUE_LABELS[issue.type]}</span>
+                            <span className="ml-auto text-[10px] text-muted-foreground">стр. {issue.line}</span>
+                          </div>
+                          <p className="text-xs truncate">{issue.text}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Stats panel ─────────────────────────────────────────── */}
+              {panel === "stats" && (
+                <div className="space-y-3">
+                  <h2 className="text-sm font-semibold">Статистика</h2>
+                  <div className="grid grid-cols-2 gap-2">
+                    {([
+                      ["Слов",              stats.words],
+                      ["Знаков (с пробелами)", stats.charsWithSpaces],
+                      ["Знаков (без пробелов)", stats.charsNoSpaces],
+                      ["Абзацев",           stats.paragraphs],
+                      ["Строк",             stats.lines],
+                      ["Время чтения",      `~${stats.readingMinutes} мин`],
+                    ] as [string, string | number][]).map(([label, val]) => (
+                      <div key={label} className="p-2 rounded-md bg-muted/50">
+                        <p className="text-[10px] text-muted-foreground">{label}</p>
+                        <p className="text-sm font-semibold">{val}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </ScrollArea>
         </div>
-      )}
+      </div>
     </div>
   );
 }

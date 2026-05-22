@@ -7,7 +7,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { handleAiAnalyze } from "./aiAnalyze";
+import { handleAiAnalyze, handleAiConvert } from "./aiAnalyze";
 
 const MAX_REMOTE_BYTES = 18 * 1024 * 1024;
 
@@ -15,8 +15,9 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  // ── AI-assisted citation analysis ──────────────────────────────────────────
+  // ── AI endpoints ───────────────────────────────────────────────────────────
   app.post("/api/ai-analyze", handleAiAnalyze);
+  app.post("/api/ai-convert", handleAiConvert);
 
   // ── Import from URL ────────────────────────────────────────────────────────
   app.post("/api/import-url", async (req, res) => {
