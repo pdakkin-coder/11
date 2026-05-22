@@ -22,8 +22,8 @@ export const MODELS = [
 export type GeminiModel = (typeof MODELS)[number];
 
 const API_VERSION      = "v1beta";
-const FETCH_TIMEOUT_MS = 25_000; // 25s per model attempt
-const RETRY_DELAYS_MS  = [1_500, 4_000] as const; // delays between retries within one model
+const FETCH_TIMEOUT_MS = 25_000;
+const RETRY_DELAYS_MS  = [1_500, 4_000] as const;
 
 async function fetchWithTimeout(
   url: string,
@@ -76,14 +76,6 @@ async function callGeminiModel(
   throw err;
 }
 
-/**
- * Try one model with up to 2 retries on transient errors (503 / network blip).
- * Other HTTP errors are thrown immediately without retry.
- *
- * Returns { raw, exhausted503: false } on success.
- * If all retries are consumed on 503 / network, throws with flag exhausted503 = true
- * so the caller can decide to advance to the next model.
- */
 async function tryModel(
   contents: object[],
   generationConfig: object,
@@ -109,10 +101,9 @@ async function tryModel(
 
       if (isTransient && attempt < RETRY_DELAYS_MS.length) {
         lastError = e;
-        continue; // retry same model
+        continue;
       }
 
-      // Non-transient error OR retries exhausted — bubble up to cascade
       throw e;
     }
   }
@@ -125,10 +116,6 @@ export interface GeminiResult {
   model: GeminiModel;
 }
 
-/**
- * Main cascade: walk MODELS[], advance on 429 (quota) or 503 (overload after retries).
- * Hard errors (400, 401, 404, 500…) are thrown immediately without cascade.
- */
 export async function callGemini(
   contents: object[],
   generationConfig: object,
@@ -145,7 +132,6 @@ export async function callGemini(
       const e = err as Error & { status?: number };
 
       if (e.status !== undefined && skippable.has(e.status)) {
-        // 429 — quota exceeded; 503 — overloaded after all retries
         console.warn(
           `[gemini-router] ${model} HTTP ${e.status} — ` +
           `${e.status === 429 ? "quota exceeded" : "overloaded after retries"}, ` +
@@ -154,7 +140,6 @@ export async function callGemini(
         continue;
       }
 
-      // Non-skippable error — fail fast
       throw e;
     }
   }
