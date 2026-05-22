@@ -1,21 +1,21 @@
 /**
  * geminiRouter.ts — Gemini model cascade
  *
- * Cascade order (as of 2026-05-21, free-tier AI Studio limits):
- *   1. gemini-2.5-flash      —  5 RPM,  20 RPD  (primary)
- *   2. gemini-3.5-flash      —  5 RPM,  20 RPD  (fallback-1)
- *   3. gemini-3.1-flash-lite — 15 RPM, 500 RPD  (fallback-2)
+ * Cascade order (free-tier AI Studio limits, 2026-05):
+ *   1. gemini-2.5-flash   —  5 RPM,  20 RPD  (primary)
+ *   2. gemini-1.5-flash   — 15 RPM, 1500 RPD (fallback-1)
+ *   3. gemini-1.5-flash-8b — 15 RPM, 1500 RPD (fallback-2, lightest)
  *
  * On 429: advance to next model in cascade.
- * On 503: retry within same model (up to 2x), then advance to next model.
+ * On 503: retry within same model (up to 2×), then advance to next model.
  * On transient network error (status === undefined): retry within same model.
  * All models exhausted: throw with UTC-midnight RPD reset hint.
  */
 
 export const MODELS = [
   "gemini-2.5-flash",
-  "gemini-3.5-flash",
-  "gemini-3.1-flash-lite",
+  "gemini-1.5-flash",
+  "gemini-1.5-flash-8b",
 ] as const;
 
 export type GeminiModel = typeof MODELS[number];
@@ -77,8 +77,10 @@ async function callGeminiModel(
 
 /**
  * Try one model with retries.
- * Retries ONLY on: 503 (overload) or status === undefined (transient network blip).
- * Any other HTTP error (400, 404, 429, 500...) is thrown immediately.
+ * Retries ONLY on: 503 (overload) or status === undefined (transient network).
+ * Any other HTTP error (400, 404, 429, 500…) is thrown immediately.
+ * After retries exhausted on 503, throws a fresh error with status=503
+ * so the caller (callGemini) can reliably advance to the next model.
  */
 async function tryModel(
   contents: object[],
@@ -86,7 +88,8 @@ async function tryModel(
   apiKey: string,
   model: GeminiModel,
 ): Promise<string> {
-  let lastError: Error | null = null;
+  let lastError: (Error & { status?: number }) | null = null;
+
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     if (attempt > 0) {
       await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
@@ -95,15 +98,26 @@ async function tryModel(
       return await callGeminiModel(contents, generationConfig, apiKey, model);
     } catch (err) {
       const e = err as Error & { status?: number };
-      // Retry only on 503 or genuinely transient network errors (no HTTP status at all)
       const isTransient = e.status === 503 || e.status === undefined;
-      if (isTransient && attempt < RETRY_DELAYS_MS.length) {
+
+      if (isTransient) {
         lastError = e;
-        continue;
+        // Still have retry slots — keep going
+        if (attempt < RETRY_DELAYS_MS.length) continue;
+        // Retries exhausted: throw with explicit status so cascade advances
+        const exhausted = new Error(
+          `Gemini [${model}] 503: перегружена после ${attempt + 1} попыток`,
+        ) as Error & { status: number };
+        exhausted.status = 503;
+        throw exhausted;
       }
+
+      // Non-transient (400, 404, 429, 500…): propagate immediately
       throw e;
     }
   }
+
+  // Unreachable — but satisfies TS
   throw lastError ?? new Error(`Gemini [${model}]: все попытки исчерпаны`);
 }
 
@@ -114,7 +128,7 @@ export interface GeminiResult {
 
 /**
  * Main cascade: walk MODELS[], advance on 429 (quota) or 503 (overload after retries).
- * Non-skippable HTTP errors (400, 404, 500...) are thrown immediately.
+ * Non-skippable HTTP errors (400, 404, 500…) are thrown immediately.
  */
 export async function callGemini(
   contents: object[],
@@ -129,12 +143,11 @@ export async function callGemini(
     } catch (err) {
       const e = err as Error & { status?: number };
       if (e.status === 429) {
-        console.warn(`[gemini-router] ${model} quota exceeded (429), trying next model`);
+        console.warn(`[gemini-router] ${model} quota (429) → next model`);
         continue;
       }
-      // NEW: also advance on 503 after retries are exhausted in tryModel
       if (e.status === 503) {
-        console.warn(`[gemini-router] ${model} overloaded (503) after retries, trying next model`);
+        console.warn(`[gemini-router] ${model} overloaded (503) → next model`);
         continue;
       }
       throw e;
@@ -142,8 +155,8 @@ export async function callGemini(
   }
 
   throw new Error(
-    `Квота исчерпана на всех моделях (${MODELS.join(" → ")}). ` +
+    `Все модели Gemini недоступны (${MODELS.join(" → ")}). ` +
     `RPD сбрасывается в полночь UTC. ` +
-    `Подождите до следующего дня или проверьте план: https://ai.dev/rate-limit`
+    `Подождите или проверьте план: https://ai.dev/rate-limit`,
   );
 }

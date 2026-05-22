@@ -220,11 +220,6 @@ export default function Workbench() {
     readingMinutes:   Math.max(1, Math.round(countWords(text) / 180)),
   }), [text, structure.paragraphs]);
 
-  /**
-   * Run AI analysis.
-   * If convertedText is present — apply it immediately to the editor.
-   * Otherwise — only update annotation highlights.
-   */
   async function handleAiAnalyze(targetStyle?: CitationStyle) {
     if (!text.trim()) return;
     const req = {
@@ -248,7 +243,6 @@ export default function Workbench() {
       return;
     }
 
-    // 1) convertedText present → apply to editor immediately
     if (result.convertedText && result.convertedText.trim()) {
       const converted = result.convertedText;
       setText(converted);
@@ -264,7 +258,6 @@ export default function Workbench() {
       return;
     }
 
-    // 2) No convertedText → analysis only, document unchanged
     if (targetStyle) {
       setAiTargetStyle(targetStyle);
       toast({
@@ -453,7 +446,7 @@ export default function Workbench() {
       {/* ── Main layout ─────────────────────────────────────────────────────── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
 
-        {/* Left sidebar — panel navigation */}
+        {/* Left sidebar */}
         <aside
           className="shrink-0 border-r bg-sidebar flex flex-col min-h-0 select-none"
           style={{ width: sidebar.width }}
@@ -480,7 +473,6 @@ export default function Workbench() {
             </nav>
           </ScrollArea>
 
-          {/* Sidebar footer stats */}
           <div className="border-t px-3 py-2 text-[10.5px] text-muted-foreground space-y-0.5">
             <div className="flex justify-between">
               <span>Слов</span><span className="font-medium text-foreground">{stats.words.toLocaleString("ru")}</span>
@@ -554,7 +546,6 @@ export default function Workbench() {
             </div>
           </div>
 
-          {/* Edit mode toolbar */}
           {!editMode && (
             <div className="border-t h-9 flex items-center px-4 gap-2 bg-background/60 shrink-0">
               <Button variant="ghost" size="sm" className="h-7 text-[11px]" onClick={() => { setDraft(text); setEditMode(true); }}>
@@ -690,7 +681,7 @@ export default function Workbench() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sub-panels (kept in same file for co-location)
+// Sub-panels
 // ─────────────────────────────────────────────────────────────────────────────
 
 function PanelHeader({ title, hint, badge }: { title: string; hint?: string; badge?: string }) {
@@ -707,36 +698,50 @@ function PanelHeader({ title, hint, badge }: { title: string; hint?: string; bad
 
 function StructurePanel({ structure }: { structure: ReturnType<typeof analyzeStructure> }) {
   const metrics = [
-    { label: "Язык",      value: structure.language === "ru" ? "Русский" : structure.language === "en" ? "English" : "Mixed" },
-    { label: "Разделов",  value: structure.sections.length },
-    { label: "Абзацев",   value: structure.paragraphs },
-    { label: "Сносок",    value: structure.footnoteCount },
+    { label: "Язык",       value: structure.language === "ru" ? "RU" : structure.language === "en" ? "EN" : "Mixed" },
+    { label: "Разделов",   value: structure.sections.length },
+    { label: "Параграфов", value: structure.paragraphs },
+    { label: "Сносок",     value: structure.footnoteCount },
   ];
 
   return (
     <div className="space-y-4">
-      <PanelHeader title="Структура документа" />
+      <PanelHeader title="Структура документа" hint="Разделы и аннотированные блоки." />
 
-      {/* Metrics grid — fixed 2 cols, no overflow */}
+      {/* Metrics grid — 2 cols, no overflow */}
       <div className="grid grid-cols-2 gap-2">
         {metrics.map(({ label, value }) => (
-          <div key={label} className="rounded-md border bg-card p-2 min-w-0 overflow-hidden">
-            <div className="text-[18px] font-bold text-primary tabular-nums truncate">{value}</div>
-            <div className="structure-label text-[10px] text-muted-foreground mt-0.5">{label}</div>
+          <div key={label} className="rounded-md border bg-card p-2 overflow-hidden">
+            <div className="text-[20px] font-bold text-primary tabular-nums leading-none truncate">{value}</div>
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground mt-1">{label}</div>
           </div>
         ))}
       </div>
 
       {/* Sections list */}
       {structure.sections.length > 0 && (
-        <div className="space-y-1.5">
+        <div className="space-y-1">
           <div className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">Разделы</div>
-          {structure.sections.map((s, i) => (
-            <div key={i} className="flex items-start gap-2 text-[12px] min-w-0">
-              <span className="text-muted-foreground shrink-0 tabular-nums pt-0.5">{i + 1}.</span>
-              <span className="line-clamp-2 break-words min-w-0" title={s.text}>{s.text}</span>
-            </div>
-          ))}
+          <div className="space-y-0.5">
+            {structure.sections.map((s, i) => (
+              <div
+                key={i}
+                className="flex items-baseline gap-2 min-w-0 overflow-hidden rounded px-1 py-0.5 hover:bg-accent/40 transition-colors"
+              >
+                {/* line number — fixed width, never shrinks */}
+                <span className="text-[10.5px] text-muted-foreground tabular-nums shrink-0 w-6 text-right">
+                  {s.line}
+                </span>
+                {/* section text — truncates, never overflows */}
+                <span
+                  className="text-[12px] truncate min-w-0 flex-1"
+                  title={s.text}
+                >
+                  {s.text}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -768,7 +773,6 @@ function CitationsPanel({
         hint="Цитаты, сноски и библиографические записи, найденные в тексте."
       />
 
-      {/* Legend */}
       {allFound.length > 0 && (
         <div className="flex flex-wrap gap-x-3 gap-y-1">
           {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).filter(([t]) => typeCounts[t]).map(([t, label]) => (
@@ -786,7 +790,6 @@ function CitationsPanel({
         </div>
       )}
 
-      {/* Search */}
       <div className="relative">
         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
         <Input
@@ -797,7 +800,6 @@ function CitationsPanel({
         />
       </div>
 
-      {/* Items */}
       <div className="space-y-1.5">
         {found.length === 0 && (
           <p className="text-[12px] text-muted-foreground text-center py-6">
@@ -870,7 +872,6 @@ function StylePanel({
         )}
       </div>
 
-      {/* Custom rules */}
       <div className="space-y-2">
         <button
           className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
