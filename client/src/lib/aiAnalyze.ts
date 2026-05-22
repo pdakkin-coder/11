@@ -10,7 +10,8 @@
 import { useState, useCallback, useRef } from "react";
 import type { FoundItem, CitationStyle } from "./analyze";
 
-const CLIENT_TIMEOUT_MS = 100_000;
+// 45 s — generous for Gemini 2.5 Flash but short enough to give user feedback fast
+const CLIENT_TIMEOUT_MS = 45_000;
 
 export interface AiAnalyzeRequest {
   text: string;
@@ -60,7 +61,7 @@ export interface AiAnalyzeState {
   data:        AiAnalyzeResponse | null;
   loading:     boolean;
   error:       string | null;
-  activeModel: string | null;   // label of the model that last responded
+  activeModel: string | null;
 }
 
 /** Humanise raw error strings coming from the server or browser */
@@ -81,7 +82,7 @@ function humaniseError(raw: string): string {
     return "Достигнут лимит запросов к Gemini. Подождите минуту и повторите.";
 
   if (raw.includes("AbortError") || raw.includes("отменён"))
-    return "AI-анализ отменён (превышено время ожидания 100 с).";
+    return `AI-анализ отменён (превышено время ожидания ${CLIENT_TIMEOUT_MS / 1000} с).`;
 
   return raw;
 }
@@ -139,9 +140,14 @@ export function useAiAnalyze() {
     } catch (err) {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
+      // Unified AbortError detection: check both name and message
+      const isAbort =
+        (err instanceof Error && err.name === "AbortError") ||
+        (err instanceof Error && err.message.includes("aborted"));
+
       const raw = err instanceof Error ? err.message : String(err);
-      const msg = (err as Error).name === "AbortError"
-        ? "AI-анализ отменён (превышено время ожидания 100 с)."
+      const msg = isAbort
+        ? `AI-анализ отменён (превышено время ожидания ${CLIENT_TIMEOUT_MS / 1000} с).`
         : humaniseError(raw);
 
       const errorResponse: AiAnalyzeResponse = {

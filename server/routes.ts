@@ -22,7 +22,7 @@ export async function registerRoutes(
   // ── AI-assisted citation analysis ──────────────────────────────────────────
   app.post("/api/ai-analyze", handleAiAnalyze);
 
-  // ── Import from URL ────────────────────────────────────────────────────────
+  // ── Import from URL ─────────────────────────────────────────────────────────
   app.post("/api/import-url", async (req, res) => {
     const rawUrl = typeof req.body?.url === "string" ? req.body.url.trim() : "";
     if (!rawUrl) {
@@ -40,13 +40,23 @@ export async function registerRoutes(
       return res.status(400).json({ message: "Поддерживаются только http/https ссылки." });
     }
 
-    const fetched = await fetch(url, {
-      headers: {
-        "user-agent": "CodexCitationDesktop/0.1 (+document-import)",
-        accept: "application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,text/html,*/*",
-      },
-      redirect: "follow",
-    });
+    // Wrap outer fetch in try/catch to handle network-level failures
+    // (ENOTFOUND, ECONNRESET, ECONNREFUSED) that would otherwise crash the route
+    let fetched: Response;
+    try {
+      fetched = await fetch(url, {
+        headers: {
+          "user-agent": "CodexCitationDesktop/0.1 (+document-import)",
+          accept: "application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,text/html,*/*",
+        },
+        redirect: "follow",
+      });
+    } catch (fetchErr) {
+      const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      return res.status(502).json({
+        message: `Не удалось получить файл: ${msg}. Проверьте, что ссылка публичная и сервер доступен.`,
+      });
+    }
 
     if (!fetched.ok) {
       return res.status(400).json({
@@ -95,7 +105,7 @@ export async function registerRoutes(
     });
   });
 
-  // ── Export to Drive ────────────────────────────────────────────────────────
+  // ── Export to Drive ──────────────────────────────────────────────────────────
   app.post("/api/export-drive", async (req, res) => {
     const text = typeof req.body?.text === "string" ? req.body.text : "";
     const docName = typeof req.body?.docName === "string" ? req.body.docName : "document.txt";

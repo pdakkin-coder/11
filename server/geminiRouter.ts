@@ -1,7 +1,12 @@
 import type { Request, Response } from "express";
 
-const MODEL = "gemini-2.5-flash";
-const URL   = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+const PRIMARY_MODEL  = "gemini-2.5-flash";
+const FALLBACK_MODEL = "gemini-1.5-flash";
+
+// Renamed from URL to avoid shadowing globalThis.URL
+function geminiUrl(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+}
 
 const SYSTEM_PROMPT = `You are an expert academic citation analysis engine.
 Given a scholarly document, identify ALL inline citations, bibliography entries, and direct quotes.
@@ -50,6 +55,32 @@ function buildPrompt(text: string, language: string, targetStyle?: string): stri
   return lines.join("\n");
 }
 
+/** Call one Gemini model. Returns { ok, status, body }. Never throws. */
+async function callGemini(
+  apiKey: string,
+  model: string,
+  prompt: string,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; status: number; body: string }> {
+  try {
+    const res = await fetch(`${geminiUrl(model)}?key=${apiKey}`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0 },
+      }),
+      signal,
+    });
+    const body = await res.text();
+    return { ok: res.ok, status: res.status, body };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 0, body: msg };
+  }
+}
+
 export async function handleAiAnalyze(req: Request, res: Response): Promise<void> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -73,30 +104,33 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
 
   const prompt = buildPrompt(text, language, targetStyle);
 
-  // --- Send request to Gemini ---
-  const geminiRes = await fetch(`${URL}?key=${apiKey}`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0 },
-    }),
-  });
+  // --- Try PRIMARY model, fall back to FALLBACK on quota/overload ---
+  let geminiResult = await callGemini(apiKey, PRIMARY_MODEL, prompt);
+  let usedModel    = PRIMARY_MODEL;
+  let usedLabel    = "Gemini 2.5 Flash";
 
-  // --- Read raw response ---
-  const geminiBody = await geminiRes.text();
+  const shouldFallback =
+    !geminiResult.ok &&
+    (geminiResult.status === 429 || geminiResult.status === 503 || geminiResult.status === 0);
 
-  if (!geminiRes.ok) {
-    console.error(`[gemini] ${geminiRes.status}:`, geminiBody.slice(0, 300));
-    res.status(geminiRes.status).json({ error: geminiBody });
+  if (shouldFallback) {
+    console.warn(`[gemini] ${PRIMARY_MODEL} returned ${geminiResult.status}, retrying with ${FALLBACK_MODEL}`);
+    geminiResult = await callGemini(apiKey, FALLBACK_MODEL, prompt);
+    usedModel    = FALLBACK_MODEL;
+    usedLabel    = "Gemini 1.5 Flash (fallback)";
+  }
+
+  if (!geminiResult.ok) {
+    console.error(`[gemini] ${usedModel} ${geminiResult.status}:`, geminiResult.body.slice(0, 300));
+    const status = geminiResult.status || 502;
+    res.status(status).json({ error: geminiResult.body });
     return;
   }
 
   // --- Extract model text ---
   let modelText: string;
   try {
-    const geminiJson = JSON.parse(geminiBody) as {
+    const geminiJson = JSON.parse(geminiResult.body) as {
       candidates?: { content?: { parts?: { text?: string }[] } }[];
     };
     modelText = geminiJson.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
@@ -130,7 +164,7 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
     language:      typeof parsed.language      === "string" ? parsed.language      : language,
     summary:       typeof parsed.summary       === "string" ? parsed.summary       : "",
     convertedText: typeof parsed.convertedText === "string" ? parsed.convertedText : null,
-    _model:        MODEL,
-    _label:        "Gemini 2.5 Flash",
+    _model:        usedModel,
+    _label:        usedLabel,
   });
 }
