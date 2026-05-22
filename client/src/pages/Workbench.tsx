@@ -24,7 +24,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
-import { CodexLogo } from "@/components/Logo";
+import { CitaDexLogo } from "@/components/Logo";
 import { useTheme } from "@/components/ThemeProvider";
 import { DEMO_DOCS, SAMPLE_DOC, SAMPLE_DOC_TITLE, type DemoId } from "@/lib/sampleDoc";
 import {
@@ -229,7 +229,6 @@ export default function Workbench() {
 
   // ── Derived AI status ─────────────────────────────────────────────────────
   const aiStatusOk      = !aiLoading && !!aiData && !aiError;
-  /** Label to show in the status bar — prefer convert model if convert just ran */
   const activeModelLabel = aiConvertModel ?? aiAnalyzeModel;
   const activeRetries    = aiConvertRetries > 0 ? aiConvertRetries : aiAnalyzeRetries;
 
@@ -237,7 +236,6 @@ export default function Workbench() {
   async function handleAiAnalyze() {
     if (!text.trim()) return;
 
-    // Build Evidence-Pack from heuristic results
     const pack = typeof buildEvidencePack === "function"
       ? buildEvidencePack(text, heuristicFound, structure)
       : null;
@@ -256,8 +254,7 @@ export default function Workbench() {
           structureCandidates:    pack.structureCandidates,
           scope: ["analyze"],
         }
-      : // Fallback: legacy format (server accepts both)
-        { text, language: structure.language, scope: ["analyze"] } as unknown as AiAnalyzeRequest;
+      : { text, language: structure.language, scope: ["analyze"] } as unknown as AiAnalyzeRequest;
 
     const result = await runAiAnalysis(req);
     if (!result) return;
@@ -273,7 +270,7 @@ export default function Workbench() {
       return;
     }
 
-    const modelNote = result._label ? ` (✓ ${result._label})` : "";
+    const modelNote = result._label ? ` (✓ ${result._label})` : "";
     toast({
       title: `AI-анализ завершён${modelNote}`,
       description:
@@ -448,22 +445,49 @@ export default function Workbench() {
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground" data-testid="workbench">
+
       {/* ── Header ──────────────────────────────────────────────────────────── */}
-      <header className="h-14 border-b flex items-center px-4 gap-3 shrink-0 bg-background/80 backdrop-blur" data-testid="header">
-        <div className="flex items-center gap-2.5 shrink-0">
-          <CodexLogo size={28} />
+      <header
+        className="h-14 border-b flex items-center px-4 gap-3 shrink-0 bg-background/80 backdrop-blur"
+        data-testid="header"
+      >
+        {/* Brand block */}
+        <div className="flex items-center gap-3 shrink-0">
+          {/* Logo tinted with primary colour */}
+          <span className="text-primary">
+            <CitaDexLogo size={30} />
+          </span>
           <div className="leading-none select-none">
-            <div className="text-[15px] font-semibold tracking-tight text-foreground">CitaDex</div>
-            <div className="text-[11px] text-muted-foreground -mt-0.5">Academic Citation Workspace</div>
+            <div className="text-[15px] font-bold tracking-normal text-foreground leading-tight">
+              CitaDex
+            </div>
+            {/* Subtitle hidden on narrow screens to avoid crowding */}
+            <div className="text-[11px] text-muted-foreground mt-0.5 hidden sm:block">
+              Academic Citation Workspace
+            </div>
           </div>
         </div>
-        <Separator orientation="vertical" className="h-7 mx-2" />
+
+        <Separator orientation="vertical" className="h-6 mx-1" />
+
+        {/* Document name */}
         <div className="flex items-center gap-2 text-sm min-w-0 flex-1">
           <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-          <span className="font-medium truncate max-w-[28ch]" data-testid="text-docname">{docName}</span>
+          <span className="font-medium truncate max-w-[28ch]" data-testid="text-docname">
+            {docName}
+          </span>
         </div>
+
+        {/* Actions */}
         <div className="ml-auto flex items-center gap-2 shrink-0">
-          <input ref={fileInput} type="file" accept=".docx,.txt,.md" onChange={handleFile} className="hidden" data-testid="input-file" />
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".docx,.txt,.md"
+            onChange={handleFile}
+            className="hidden"
+            data-testid="input-file"
+          />
           <Button variant="outline" size="sm" onClick={() => fileInput.current?.click()} data-testid="button-import">
             <Upload className="h-4 w-4 mr-1.5" />Импорт
           </Button>
@@ -471,7 +495,9 @@ export default function Workbench() {
             <Link2 className="h-4 w-4 mr-1.5" />Ссылка
           </Button>
           <Select value={exportFormat} onValueChange={(v) => setExportFormat(v as ExportFormat)}>
-            <SelectTrigger className="h-9 w-[112px]" data-testid="select-export-format"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-9 w-[112px]" data-testid="select-export-format">
+              <SelectValue />
+            </SelectTrigger>
             <SelectContent>
               <SelectItem value="docx">DOCX</SelectItem>
               <SelectItem value="txt">TXT</SelectItem>
@@ -482,11 +508,21 @@ export default function Workbench() {
           <Button variant="outline" size="sm" onClick={handleExport} data-testid="button-export">
             <Download className="h-4 w-4 mr-1.5" />Экспорт
           </Button>
-          <Button variant="outline" size="sm" onClick={handleDriveExport} disabled={driveLoading} data-testid="button-export-drive">
+          <Button
+            variant="outline" size="sm"
+            onClick={handleDriveExport}
+            disabled={driveLoading}
+            data-testid="button-export-drive"
+          >
             <Upload className="h-4 w-4 mr-1.5" />{driveLoading ? "Drive…" : "В Drive"}
           </Button>
-          <Button variant="outline" size="sm" onClick={handleAiAnalyze} disabled={aiLoading || !text.trim()} data-testid="button-ai-analyze"
-            title="Анализ структуры и цитирования через Gemini AI">
+          <Button
+            variant="outline" size="sm"
+            onClick={handleAiAnalyze}
+            disabled={aiLoading || !text.trim()}
+            data-testid="button-ai-analyze"
+            title="Анализ структуры и цитирования через Gemini AI"
+          >
             <Sparkles className="h-4 w-4 mr-1.5" />{aiLoading ? "AI…" : "AI-анализ"}
           </Button>
           <Button variant="ghost" size="icon" onClick={toggle} data-testid="button-theme">
@@ -500,7 +536,6 @@ export default function Workbench() {
         <div className="h-7 border-b px-4 flex items-center gap-2 text-[11px] bg-muted/40">
           <Sparkles className="h-3.5 w-3.5 text-primary shrink-0" />
 
-          {/* Loading states */}
           {(aiLoading || aiConvertLoading) && (
             <span className="text-muted-foreground">
               {aiConvertLoading ? "AI-конвертация…" : "AI-анализ…"}
@@ -512,17 +547,15 @@ export default function Workbench() {
             </span>
           )}
 
-          {/* Success state */}
           {aiStatusOk && !aiConvertLoading && !aiLoading && (
             <span className="flex items-center gap-1.5 min-w-0">
               <span>
-                AI‑анализ активен: {aiData!.items.length} эл. — {aiData!.detectedStyle}
+                AI‑анализ активен: {aiData!.items.length} эл. — {aiData!.detectedStyle}
                 {" "}({Math.round((aiData!.confidence ?? 0) * 100)}%)
               </span>
               {aiTargetStyle && (
-                <span> · конвертация в <strong>{aiTargetStyle}</strong> применена.</span>
+                <span> · конвертация в <strong>{aiTargetStyle}</strong> применена.</span>
               )}
-              {/* Model badge */}
               {activeModelLabel && (
                 <Badge variant="outline" className="ml-1 text-[10px] px-1.5 py-0 h-4 gap-1 shrink-0">
                   <Cpu className="h-2.5 w-2.5" />{activeModelLabel}
@@ -531,7 +564,6 @@ export default function Workbench() {
             </span>
           )}
 
-          {/* Error state */}
           {!aiLoading && !aiConvertLoading && (aiError || aiConvertError) && (
             <button
               type="button"
@@ -574,11 +606,18 @@ export default function Workbench() {
             <DialogDescription>Для AI-анализа и AI-конвертации необходим ключ Gemini API.</DialogDescription>
           </DialogHeader>
           <div className="text-sm space-y-2 text-muted-foreground">
-            <p>1. Получите бесплатный ключ на <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary underline">aistudio.google.com</a>.</p>
-            <p>2. Установите переменную окружения: <code className="bg-muted px-1 rounded">GEMINI_API_KEY=ваш_ключ</code></p>
+            <p>1. Получите бесплатный ключ на{" "}
+              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary underline">
+                aistudio.google.com
+              </a>.
+            </p>
+            <p>2. Установите переменную окружения:{" "}
+              <code className="bg-muted px-1 rounded">GEMINI_API_KEY=ваш_ключ</code>
+            </p>
             <p>3. Перезапустите сервер (<code className="bg-muted px-1 rounded">npm run dev</code>).</p>
             <p className="text-[11px] pt-1">
-              Модельный каскад: {["Gemini 2.5 Flash", "Gemini 3.5 Flash", "Gemini 3.1 Flash Lite"].join(" → ")}
+              Модельный каскад:{" "}
+              {["Gemini 2.5 Flash", "Gemini 3.5 Flash", "Gemini 3.1 Flash Lite"].join(" → ")}
             </p>
           </div>
           <DialogFooter>
@@ -589,6 +628,7 @@ export default function Workbench() {
 
       {/* ── Main layout ─────────────────────────────────────────────────────── */}
       <div className="flex flex-1 min-h-0">
+
         {/* ── Left sidebar ──────────────────────────────────────────────────── */}
         <aside
           className="flex flex-col border-r bg-muted/30 shrink-0"
@@ -668,7 +708,9 @@ export default function Workbench() {
               <span>Предпросмотр конвертации в <strong>{preview.target}</strong></span>
               <div className="ml-auto flex gap-2">
                 <Button size="sm" variant="outline" className="h-7 text-xs border-amber-400" onClick={() => setPreview(null)}>Отмена</Button>
-                <Button size="sm" className="h-7 text-xs bg-amber-600 hover:bg-amber-700 text-white" onClick={applyConversion}><CheckCircle2 className="h-3.5 w-3.5 mr-1" />Применить</Button>
+                <Button size="sm" className="h-7 text-xs bg-amber-600 hover:bg-amber-700 text-white" onClick={applyConversion}>
+                  <CheckCircle2 className="h-3.5 w-3.5 mr-1" />Применить
+                </Button>
               </div>
             </div>
           )}
@@ -860,7 +902,6 @@ export default function Workbench() {
                 <div className="space-y-4">
                   <h2 className="text-sm font-semibold">Конвертация</h2>
 
-                  {/* Heuristic conversion */}
                   <div className="space-y-2">
                     <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">Эвристическая</p>
                     <Select
@@ -885,7 +926,6 @@ export default function Workbench() {
 
                   <Separator />
 
-                  {/* AI conversion */}
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">AI-конвертация (Gemini)</p>
@@ -949,7 +989,6 @@ export default function Workbench() {
 
                   <Separator />
 
-                  {/* Custom rules */}
                   <div className="space-y-2">
                     <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">Авторский шаблон</p>
                     <div className="space-y-1.5">

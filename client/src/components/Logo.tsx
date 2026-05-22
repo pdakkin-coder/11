@@ -1,38 +1,102 @@
 /**
- * CitaDex logo — a refined monogram mark combining the letters C and D
- * within a rounded square. Uses CSS custom property --primary so the mark
- * adopts the brand accent colour in both light and dark themes.
+ * CitaDex logo — open book with cursor mark.
+ *
+ * Design rationale:
+ *   - Open book shape = academic document editing
+ *   - Small cursor triangle = active editing / citation insertion
+ *   - Works at 16px (favicon) through 200px (splash)
+ *   - Monochrome-first: uses currentColor for all strokes
+ *   - Tinted fill uses a CSS custom-property-safe opacity layer
+ *
+ * Theming: place inside any element that sets `color` — the mark
+ * adopts that colour automatically via currentColor.
+ * For the brand teal, wrap in a container with `color: hsl(var(--primary))`.
  */
-export function CodexLogo({ size = 26 }: { size?: number }) {
+
+interface LogoProps {
+  size?: number;
+  className?: string;
+}
+
+export function CitaDexLogo({ size = 32, className }: LogoProps) {
   return (
     <svg
       width={size}
       height={size}
       viewBox="0 0 32 32"
       fill="none"
+      xmlns="http://www.w3.org/2000/svg"
       role="img"
       aria-label="CitaDex"
-      xmlns="http://www.w3.org/2000/svg"
+      className={className}
     >
+      {/* ── Background pill ─────────────────────────────────────────── */}
       <rect
         x="1" y="1" width="30" height="30" rx="8"
-        fill="hsl(var(--primary) / 0.12)"
-        stroke="hsl(var(--primary) / 0.30)"
-        strokeWidth="1.2"
+        fill="currentColor"
+        fillOpacity="0.09"
+        aria-hidden="true"
       />
-      {/* C arc — Citation */}
+      <rect
+        x="1" y="1" width="30" height="30" rx="8"
+        stroke="currentColor"
+        strokeOpacity="0.22"
+        strokeWidth="1"
+        aria-hidden="true"
+      />
+
+      {/* ── Left page of open book ──────────────────────────────────── */}
+      {/*
+        Spine at x=16, left page sweeps to x=6.
+        Bottom corners rest at y=22; top arcs slightly to suggest a page.
+      */}
       <path
-        d="M18.5 9.5 C14.5 9.5 11 12.4 11 16 C11 19.6 14.5 22.5 18.5 22.5"
-        stroke="hsl(var(--primary))"
-        strokeWidth="2.4"
+        d="M16 8.5 C13 8 9 8.5 6.5 10 L6.5 22.5 C9 21.2 13 20.8 16 21.5 Z"
+        fill="currentColor"
+        fillOpacity="0.14"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
         strokeLinecap="round"
+        aria-hidden="true"
       />
-      {/* D vertical bar — Dex/index */}
-      <line x1="21" y1="9.5"  x2="21" y2="22.5" stroke="hsl(var(--primary))" strokeWidth="2.4" strokeLinecap="round" />
-      {/* D upper connector */}
-      <line x1="18.5" y1="9.5"  x2="21" y2="9.5"  stroke="hsl(var(--primary))" strokeWidth="2.4" strokeLinecap="round" />
-      {/* D lower connector */}
-      <line x1="18.5" y1="22.5" x2="21" y2="22.5" stroke="hsl(var(--primary))" strokeWidth="2.4" strokeLinecap="round" />
+
+      {/* ── Right page of open book ─────────────────────────────────── */}
+      <path
+        d="M16 8.5 C19 8 23 8.5 25.5 10 L25.5 22.5 C23 21.2 19 20.8 16 21.5 Z"
+        fill="currentColor"
+        fillOpacity="0.06"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        aria-hidden="true"
+      />
+
+      {/* ── Spine line ──────────────────────────────────────────────── */}
+      <line
+        x1="16" y1="8.5"
+        x2="16" y2="21.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        aria-hidden="true"
+      />
+
+      {/* ── Cursor / insertion mark (bottom-right) ──────────────────── */}
+      {/*
+        A small blinking-cursor triangle — signals active editing.
+        Sits at bottom-right, intentionally breaking the book symmetry.
+      */}
+      <path
+        d="M20 24 L23.2 27.5 L23.2 24 Z"
+        fill="currentColor"
+        fillOpacity="0.85"
+        aria-hidden="true"
+      />
     </svg>
   );
 }
+
+/** @deprecated Use CitaDexLogo instead. Kept for back-compat. */
+export const CodexLogo = CitaDexLogo;
