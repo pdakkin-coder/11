@@ -2,9 +2,9 @@
  * geminiRouter.ts — Gemini model cascade with circuit-breaker
  *
  * Cascade order (as of 2026-05-21, free-tier AI Studio limits):
- *   1. gemini-2.5-flash      —  5 RPM,  20 RPD  (primary)
- *   2. gemini-1.5-flash      — 15 RPM, 500 RPD  (fallback-1)
- *   3. gemini-1.5-flash-8b   — 15 RPM, 500 RPD  (fallback-2)
+ *   1. gemini-2.5-flash       —  5 RPM,  20 RPD  (primary)
+ *   2. gemini-3.5-flash       —  5 RPM,  20 RPD  (fallback-1)
+ *   3. gemini-3.1-flash-lite  — 15 RPM, 500 RPD  (fallback-2)
  *
  * On 429:                  advance to next model in cascade.
  * On 503 / network error:  retry within same model (max 2 retries).
@@ -26,9 +26,9 @@ export interface ModelMeta {
 }
 
 export const MODEL_REGISTRY: ModelMeta[] = [
-  { id: "gemini-2.5-flash",    label: "Gemini 2.5 Flash",    rpm:  5, rpd:   20 },
-  { id: "gemini-1.5-flash",    label: "Gemini 1.5 Flash",    rpm: 15, rpd:  500 },
-  { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash 8B", rpm: 15, rpd: 1500 },
+  { id: "gemini-2.5-flash",      label: "Gemini 2.5 Flash",      rpm:  5, rpd:   20 },
+  { id: "gemini-3.5-flash",      label: "Gemini 3.5 Flash",      rpm:  5, rpd:   20 },
+  { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite", rpm: 15, rpd:  500 },
 ];
 
 export const MODELS = MODEL_REGISTRY.map((m) => m.id) as
@@ -46,13 +46,13 @@ export function modelLabel(modelId: string): string {
 const API_VERSION        = "v1beta";
 const FETCH_TIMEOUT_MS   = 90_000;
 const RETRY_DELAYS_MS    = [1_500, 4_000] as const;
-const CIRCUIT_TRIP_COUNT = 3;    // consecutive failures before tripping
-const CIRCUIT_RESET_MS   = 60_000; // how long a tripped model is skipped
+const CIRCUIT_TRIP_COUNT = 3;      // consecutive failures before tripping
+const CIRCUIT_RESET_MS   = 60_000; // how long a tripped model is skipped (ms)
 
 // ── Circuit-breaker state ──────────────────────────────────────────────────
 
 interface CircuitState {
-  failures:    number;
+  failures:     number;
   trippedUntil: number; // epoch ms; 0 = not tripped
 }
 
@@ -179,7 +179,6 @@ async function tryModel(
         recordFailure(model);
         continue;
       }
-      // Non-transient or retries exhausted — propagate immediately
       recordFailure(model);
       throw e;
     }
@@ -207,7 +206,6 @@ export async function callGemini(
   apiKey: string,
 ): Promise<GeminiResult> {
   for (const model of MODELS) {
-    // Skip models whose circuit breaker is open
     if (isTripped(model)) {
       console.warn(`[gemini-router] skipping ${model} — circuit OPEN`);
       continue;
@@ -225,7 +223,6 @@ export async function callGemini(
         recordFailure(model);
         continue;
       }
-      // Any other error terminates the cascade
       throw e;
     }
   }
