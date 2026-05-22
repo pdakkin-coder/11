@@ -6,9 +6,9 @@
  *   2. gemini-3.5-flash      —  5 RPM,  20 RPD  (fallback-1)
  *   3. gemini-3.1-flash-lite — 15 RPM, 500 RPD  (fallback-2)
  *
- * On 429: advance to next model in cascade.
- * On 503: retry within same model (up to 2×), then advance to next model.
- * On transient network error (status === undefined): retry within same model.
+ * On 429 or 503: immediately advance to next model (no retries — overloaded
+ *   models rarely recover within seconds).
+ * On AbortError / network error (status === undefined): retry once, then advance.
  * All models exhausted: throw with UTC-midnight RPD reset hint.
  */
 
@@ -21,8 +21,7 @@ export const MODELS = [
 export type GeminiModel = typeof MODELS[number];
 
 const API_VERSION      = "v1beta";
-const FETCH_TIMEOUT_MS = 25_000;
-const RETRY_DELAYS_MS  = [1_500, 4_000] as const;
+const FETCH_TIMEOUT_MS = 15_000; // 15s → 3 models = 45s max, well within Express limit
 
 async function fetchWithTimeout(
   url: string,
@@ -76,11 +75,10 @@ async function callGeminiModel(
 }
 
 /**
- * Try one model with retries.
- * Retries ONLY on: 503 (overload) or status === undefined (transient network).
- * Any other HTTP error (400, 404, 429, 500…) is thrown immediately.
- * After retries exhausted on 503, throws a fresh error with status=503
- * so the caller (callGemini) can reliably advance to the next model.
+ * Try one model.
+ * - 429 / 503: throw immediately so cascade advances (no point waiting).
+ * - AbortError / network (status===undefined): one retry after 1s, then throw.
+ * - Everything else: throw immediately.
  */
 async function tryModel(
   contents: object[],
@@ -88,35 +86,29 @@ async function tryModel(
   apiKey: string,
   model: GeminiModel,
 ): Promise<string> {
-  let lastError: (Error & { status?: number }) | null = null;
-
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
-    if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
-    }
+  for (let attempt = 0; attempt <= 1; attempt++) {
     try {
       return await callGeminiModel(contents, generationConfig, apiKey, model);
     } catch (err) {
-      const e = err as Error & { status?: number };
-      const isTransient = e.status === 503 || e.status === undefined;
+      const e = err as Error & { status?: number; name?: string };
 
-      if (isTransient) {
-        lastError = e;
-        if (attempt < RETRY_DELAYS_MS.length) continue;
-        // Retries exhausted — throw with explicit status so cascade advances
-        const exhausted = new Error(
-          `Gemini [${model}] 503: перегружена после ${attempt + 1} попыток`,
-        ) as Error & { status: number };
-        exhausted.status = 503;
-        throw exhausted;
+      // 429 / 503 — advance cascade immediately, no retries
+      if (e.status === 429 || e.status === 503) throw e;
+
+      // Network / abort — one retry
+      const isNetworkBlip = e.status === undefined;
+      if (isNetworkBlip && attempt === 0) {
+        console.warn(`[gemini-router] ${model} network blip, retrying once…`);
+        await new Promise((r) => setTimeout(r, 1_000));
+        continue;
       }
 
-      // Non-transient (400, 404, 429, 500…): propagate immediately
+      // Everything else (400, 404, 500…) or second network failure
       throw e;
     }
   }
-
-  throw lastError ?? new Error(`Gemini [${model}]: все попытки исчерпаны`);
+  // unreachable
+  throw new Error(`Gemini [${model}]: все попытки исчерпаны`);
 }
 
 export interface GeminiResult {
@@ -125,8 +117,7 @@ export interface GeminiResult {
 }
 
 /**
- * Main cascade: walk MODELS[], advance on 429 (quota) or 503 (overload after retries).
- * Non-skippable HTTP errors (400, 404, 500…) are thrown immediately.
+ * Main cascade: walk MODELS[], advance on 429 or 503.
  */
 export async function callGemini(
   contents: object[],
