@@ -1,27 +1,97 @@
 /**
- * geminiRouter.ts — Gemini model cascade
+ * geminiRouter.ts — Gemini model cascade with circuit-breaker
  *
  * Cascade order (as of 2026-05-21, free-tier AI Studio limits):
  *   1. gemini-2.5-flash      —  5 RPM,  20 RPD  (primary)
- *   2. gemini-3.5-flash      —  5 RPM,  20 RPD  (fallback-1)
- *   3. gemini-3.1-flash-lite — 15 RPM, 500 RPD  (fallback-2)
+ *   2. gemini-1.5-flash      — 15 RPM, 500 RPD  (fallback-1)
+ *   3. gemini-1.5-flash-8b   — 15 RPM, 500 RPD  (fallback-2)
  *
- * On 429: advance to next model in cascade.
- * On 503 or transient network error (status === undefined): retry within same model.
- * All models exhausted: throw with UTC-midnight RPD reset hint.
+ * On 429:                  advance to next model in cascade.
+ * On 503 / network error:  retry within same model (max 2 retries).
+ * All models exhausted:    throw with UTC-midnight RPD reset hint.
+ *
+ * Circuit-breaker per model:
+ *   After CIRCUIT_TRIP_COUNT consecutive failures (any HTTP error),
+ *   the model is skipped for CIRCUIT_RESET_MS ms to avoid hammering a
+ *   broken endpoint and wasting quota on other models.
  */
 
-export const MODELS = [
-  "gemini-2.5-flash",
-  "gemini-3.5-flash",
-  "gemini-3.1-flash-lite",
-] as const;
+// ── Model registry ─────────────────────────────────────────────────────────
 
-export type GeminiModel = typeof MODELS[number];
+export interface ModelMeta {
+  id:    string;
+  label: string; // Human-readable label for UI badge
+  rpm:   number;
+  rpd:   number;
+}
 
-const API_VERSION      = "v1beta";
-const FETCH_TIMEOUT_MS = 90_000;
-const RETRY_DELAYS_MS  = [1_500, 4_000] as const;
+export const MODEL_REGISTRY: ModelMeta[] = [
+  { id: "gemini-2.5-flash",    label: "Gemini 2.5 Flash",    rpm:  5, rpd:   20 },
+  { id: "gemini-1.5-flash",    label: "Gemini 1.5 Flash",    rpm: 15, rpd:  500 },
+  { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash 8B", rpm: 15, rpd: 1500 },
+];
+
+export const MODELS = MODEL_REGISTRY.map((m) => m.id) as
+  [string, string, string] & string[];
+
+export type GeminiModel = (typeof MODELS)[number];
+
+/** Returns the human-readable label for a model ID, or the ID itself. */
+export function modelLabel(modelId: string): string {
+  return MODEL_REGISTRY.find((m) => m.id === modelId)?.label ?? modelId;
+}
+
+// ── Constants ──────────────────────────────────────────────────────────────
+
+const API_VERSION        = "v1beta";
+const FETCH_TIMEOUT_MS   = 90_000;
+const RETRY_DELAYS_MS    = [1_500, 4_000] as const;
+const CIRCUIT_TRIP_COUNT = 3;    // consecutive failures before tripping
+const CIRCUIT_RESET_MS   = 60_000; // how long a tripped model is skipped
+
+// ── Circuit-breaker state ──────────────────────────────────────────────────
+
+interface CircuitState {
+  failures:    number;
+  trippedUntil: number; // epoch ms; 0 = not tripped
+}
+
+const circuitMap = new Map<string, CircuitState>();
+
+function getCircuit(model: string): CircuitState {
+  if (!circuitMap.has(model)) circuitMap.set(model, { failures: 0, trippedUntil: 0 });
+  return circuitMap.get(model)!;
+}
+
+function recordSuccess(model: string): void {
+  const c = getCircuit(model);
+  c.failures = 0;
+  c.trippedUntil = 0;
+}
+
+function recordFailure(model: string): void {
+  const c = getCircuit(model);
+  c.failures++;
+  if (c.failures >= CIRCUIT_TRIP_COUNT) {
+    c.trippedUntil = Date.now() + CIRCUIT_RESET_MS;
+    console.warn(`[gemini-router] circuit OPEN for ${model} — skipping for ${CIRCUIT_RESET_MS / 1000}s`);
+  }
+}
+
+function isTripped(model: string): boolean {
+  const c = getCircuit(model);
+  if (c.trippedUntil === 0) return false;
+  if (Date.now() > c.trippedUntil) {
+    // Auto-reset (half-open)
+    c.failures = 0;
+    c.trippedUntil = 0;
+    console.info(`[gemini-router] circuit RESET (half-open) for ${model}`);
+    return false;
+  }
+  return true;
+}
+
+// ── HTTP helpers ───────────────────────────────────────────────────────────
 
 async function fetchWithTimeout(
   url: string,
@@ -41,11 +111,13 @@ async function callGeminiModel(
   contents: object[],
   generationConfig: object,
   apiKey: string,
-  model: GeminiModel,
+  model: string,
 ): Promise<string> {
   const url =
-    `https://generativelanguage.googleapis.com/${API_VERSION}/models/${model}:generateContent?key=${apiKey}`;
+    `https://generativelanguage.googleapis.com/${API_VERSION}/models/${model}` +
+    `:generateContent?key=${apiKey}`;
 
+  const t0  = Date.now();
   const res = await fetchWithTimeout(
     url,
     {
@@ -55,35 +127,40 @@ async function callGeminiModel(
     },
     FETCH_TIMEOUT_MS,
   );
+  const latency = Date.now() - t0;
 
   if (res.ok) {
     const json = (await res.json()) as {
       candidates?: { content?: { parts?: { text?: string }[] } }[];
     };
     const raw = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-    return raw
+    const cleaned = raw
       .replace(/^\s*```(?:json)?\s*/i, "")
       .replace(/\s*```\s*$/i, "")
       .trim();
+    console.info(`[gemini-router] ${model} OK (${latency}ms, ${cleaned.length} chars)`);
+    return cleaned;
   }
 
   const errText = (await res.text()).slice(0, 600);
-  console.error(`[gemini-router] ${model} HTTP ${res.status}: ${errText}`);
+  console.error(`[gemini-router] ${model} HTTP ${res.status} (${latency}ms): ${errText}`);
   const err = new Error(`Gemini [${model}] ${res.status}: ${errText}`) as Error & { status: number };
   err.status = res.status;
   throw err;
 }
 
+// ── tryModel: single model with retry ─────────────────────────────────────
+
 /**
- * Try one model with retries.
- * Retries ONLY on: 503 (overload) or status === undefined (transient network blip).
- * Any other HTTP error (400, 404, 429, 500...) is thrown immediately.
+ * Try one model with up to RETRY_DELAYS_MS.length retries.
+ * Retries ONLY on 503 or transient network errors (status === undefined).
+ * Any other HTTP error (400, 404, 429, 500…) is thrown immediately.
  */
 async function tryModel(
   contents: object[],
   generationConfig: object,
   apiKey: string,
-  model: GeminiModel,
+  model: string,
 ): Promise<string> {
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
@@ -91,30 +168,38 @@ async function tryModel(
       await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
     }
     try {
-      return await callGeminiModel(contents, generationConfig, apiKey, model);
+      const result = await callGeminiModel(contents, generationConfig, apiKey, model);
+      recordSuccess(model);
+      return result;
     } catch (err) {
       const e = err as Error & { status?: number };
-      // Retry only on 503 or genuinely transient network errors (no HTTP status at all)
       const isTransient = e.status === 503 || e.status === undefined;
       if (isTransient && attempt < RETRY_DELAYS_MS.length) {
         lastError = e;
+        recordFailure(model);
         continue;
       }
+      // Non-transient or retries exhausted — propagate immediately
+      recordFailure(model);
       throw e;
     }
   }
   throw lastError ?? new Error(`Gemini [${model}]: все попытки исчерпаны`);
 }
 
+// ── callGemini: main cascade ───────────────────────────────────────────────
+
 export interface GeminiResult {
-  raw: string;
-  model: GeminiModel;
+  raw:   string;
+  model: string;
+  /** Human-readable label for this model (e.g. 'Gemini 2.5 Flash') */
+  label: string;
 }
 
 /**
- * Main cascade: walk MODELS[], advance only on 429.
- * Non-429 HTTP errors (400, 404, 500...) are thrown immediately.
- * Transient network errors also thrown immediately (not retried at cascade level).
+ * Main cascade: walk MODELS[], advance only on 429 or tripped circuit.
+ * Non-429 HTTP errors (400, 404, 500…) are thrown immediately without
+ * advancing the cascade — they indicate a request-level problem, not quota.
  */
 export async function callGemini(
   contents: object[],
@@ -122,16 +207,25 @@ export async function callGemini(
   apiKey: string,
 ): Promise<GeminiResult> {
   for (const model of MODELS) {
+    // Skip models whose circuit breaker is open
+    if (isTripped(model)) {
+      console.warn(`[gemini-router] skipping ${model} — circuit OPEN`);
+      continue;
+    }
+
     try {
-      const raw = await tryModel(contents, generationConfig, apiKey, model);
-      console.info(`[gemini-router] success with ${model}`);
-      return { raw, model };
+      const raw   = await tryModel(contents, generationConfig, apiKey, model);
+      const label = modelLabel(model);
+      console.info(`[gemini-router] cascade resolved with ${model} ("${label}")`);
+      return { raw, model, label };
     } catch (err) {
       const e = err as Error & { status?: number };
       if (e.status === 429) {
-        console.warn(`[gemini-router] ${model} quota exceeded (429), trying next model`);
+        console.warn(`[gemini-router] ${model} quota exceeded (429) — advancing cascade`);
+        recordFailure(model);
         continue;
       }
+      // Any other error terminates the cascade
       throw e;
     }
   }
@@ -139,6 +233,6 @@ export async function callGemini(
   throw new Error(
     `Квота исчерпана на всех моделях (${MODELS.join(" → ")}). ` +
     `RPD сбрасывается в полночь UTC. ` +
-    `Подождите до следующего дня или проверьте план: https://ai.dev/rate-limit`
+    `Подождите до следующего дня или проверьте план: https://aistudio.google.com/app/plan_information`,
   );
 }

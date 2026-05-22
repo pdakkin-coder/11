@@ -1,41 +1,145 @@
 /**
  * AI-assisted citation analysis & conversion endpoints.
  *
- * POST /api/ai-analyze  — structural + citation analysis only
+ * POST /api/ai-analyze  — structural + citation analysis
  * POST /api/ai-convert  — targeted conversion of annotated blocks
  *
  * Requires GEMINI_API_KEY in environment.
+ * Returns _model (ID) and _label (human-readable) so the client can display
+ * which Gemini model actually handled the request.
+ *
+ * Evidence-Pack pipeline:
+ *   Client sends { heuristicSummary, evidence[], bibliographyCandidates[],
+ *                  structureCandidates[], selectedFragment?, scope, targetStyle? }
+ *   instead of raw text. This reduces token usage 5-10x.
+ *   Legacy requests with req.body.text are still accepted for compatibility.
  */
 
 import type { Request, Response } from "express";
-import { callGemini } from "./geminiRouter.js";
+import { callGemini, modelLabel } from "./geminiRouter.js";
 
 const MAX_TEXT_CHARS = 24_000;
 
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function detectLang(text: string): "ru" | "en" | "mixed" {
+  const ru = (text.match(/[а-яёА-ЯЁ]/gu) ?? []).length;
+  const en = (text.match(/[a-zA-Z]/gu) ?? []).length;
+  const t  = ru + en;
+  if (!t) return "ru";
+  const r = ru / t;
+  return r > 0.7 ? "ru" : r < 0.3 ? "en" : "mixed";
+}
+
+function truncate(rawText: string): string {
+  return rawText.length > MAX_TEXT_CHARS
+    ? rawText.slice(0, MAX_TEXT_CHARS * 0.7) +
+      "\n[...document truncated for token efficiency...]\n" +
+      rawText.slice(-MAX_TEXT_CHARS * 0.3)
+    : rawText;
+}
+
+async function runGemini(
+  systemPrompt: string,
+  userMsg: string,
+  apiKey: string,
+): Promise<{ raw: string; model: string; label: string }> {
+  const contents = [
+    { role: "user",  parts: [{ text: systemPrompt }] },
+    { role: "model", parts: [{ text: "Understood. I will return only valid JSON with no markdown fences." }] },
+    { role: "user",  parts: [{ text: userMsg }] },
+  ];
+  return callGemini(
+    contents,
+    { temperature: 0, responseMimeType: "application/json" },
+    apiKey,
+  );
+}
+
+function friendlyError(msg: string): string {
+  if (msg.includes("TimeoutError") || msg.includes("signal timed out"))
+    return "Gemini не ответил за 90 секунд. Попробуйте с более коротким документом.";
+  if (
+    msg.includes("fetch failed") ||
+    msg.includes("ENOTFOUND") ||
+    msg.includes("ECONNREFUSED")
+  ) return "Не удалось подключиться к Gemini API. Проверьте интернет-соединение.";
+  return msg;
+}
+
+/**
+ * Build a compact Evidence-Pack string from the structured request body.
+ * Used when the client sends the new evidence-pack format instead of raw text.
+ */
+function buildEvidencePackMsg(body: Record<string, unknown>): string {
+  const summary = body.heuristicSummary as Record<string, unknown> | undefined;
+  const evidence = Array.isArray(body.evidence) ? body.evidence : [];
+  const bibCandidates = Array.isArray(body.bibliographyCandidates)
+    ? body.bibliographyCandidates
+    : [];
+  const structCandidates = Array.isArray(body.structureCandidates)
+    ? body.structureCandidates
+    : [];
+  const fragment = body.selectedFragment as Record<string, unknown> | undefined;
+
+  const parts: string[] = [];
+
+  if (summary) {
+    parts.push(
+      `HEURISTIC SUMMARY:\n${JSON.stringify(summary, null, 2)}`,
+    );
+  }
+  if (evidence.length) {
+    parts.push(
+      `EVIDENCE SNIPPETS (${evidence.length}):\n` +
+      JSON.stringify(evidence.slice(0, 80), null, 2), // cap at 80 snippets
+    );
+  }
+  if (bibCandidates.length) {
+    parts.push(
+      `BIBLIOGRAPHY CANDIDATES (${bibCandidates.length}):\n` +
+      JSON.stringify(bibCandidates.slice(0, 40), null, 2),
+    );
+  }
+  if (structCandidates.length) {
+    parts.push(
+      `STRUCTURE CANDIDATES (${structCandidates.length}):\n` +
+      JSON.stringify(structCandidates.slice(0, 20), null, 2),
+    );
+  }
+  if (fragment) {
+    parts.push(
+      `SELECTED FRAGMENT (chars ${fragment.charStart}–${fragment.charEnd}):\n"${fragment.text}"`,
+    );
+  }
+
+  return parts.join("\n\n");
+}
+
 // ── Analysis prompt ────────────────────────────────────────────────────────
 const ANALYZE_PROMPT = `You are an expert academic citation analysis engine.
-Given a scholarly document, perform THREE tasks:
+Given a scholarly document (or a compact evidence pack extracted from it),
+perform THREE tasks:
 
 1. STRUCTURE ANALYSIS — identify logical sections (title, abstract, introduction,
    methodology, results, discussion, conclusion, notes, bibliography). For each
    section return: heading text, start line, end line, nesting level (1–3).
 
 2. CITATION ANALYSIS — identify ALL inline citations, bibliography entries, and
-   direct quotes. Determine the citation style (APA 7, Chicago 17, MLA 9, IEEE,
-   Vancouver, Harvard, GOST 7.0.5). For each item return exact span, line,
-   character offsets, confidence score, and optional note.
+   direct quotes. Determine the citation style:
+   APA 7 | Chicago 17 | MLA 9 | IEEE | Vancouver | Harvard | GOST 7.0.5
+   For each item return exact span, line, character offsets, confidence, note.
 
-   GOST 7.0.5 specific markers to look for:
-   - Initials pattern: Иванов И.И. (surname then initials with dots)
-   - Place of publication: М.: / СПб.: / Л.: (Russian city abbreviation + colon)
-   - Electronic resource tag: [Электронный ресурс]
-   - Volume/issue: Т. N, № N
-   - Page range: С. N–N
-   - Inline references: [N] or [Фамилия И.О., год, с. N]
+   GOST 7.0.5 markers:
+   - Author pattern: Иванов И.И. (surname then initials with dots)
+   - City abbreviations: М.: / СПб.: / Л.: before publisher
+   - Tag: [Электронный ресурс]
+   - Volume/issue: Т. N, № N    |   Pages: С. N–N
+   - Inline refs: [N] or [Фамилия И.О., год, с. N]
+   - Em-dash (—) as field separator in bibliography entries
 
-3. BLOCK ANNOTATION — for each identified citation/quote block assign an
-   annotation type: "inline-apa" | "inline-numeric" | "footnote" |
-   "bibliography" | "ibid" | "quote".
+3. BLOCK ANNOTATION — assign each item a type:
+   "inline-apa" | "inline-numeric" | "footnote" | "bibliography" | "ibid" | "quote"
 
 Return ONLY valid JSON — no markdown fences, no prose:
 {
@@ -64,43 +168,50 @@ Return ONLY valid JSON — no markdown fences, no prose:
       "raw": "original entry",
       "style": "APA",
       "converted": null,
-      "fields": { "author":"","year":"","title":"","source":"","publisher":"","place":"","pages":"","doi":"","url":"" },
+      "fields": {
+        "author": "", "year": "", "title": "", "source": "",
+        "publisher": "", "place": "", "pages": "",
+        "doi": "", "url": "", "volume": "", "issue": "", "type": ""
+      },
       "startLine": 1
     }
   ]
 }`;
 
 // ── Conversion prompt ──────────────────────────────────────────────────────
-const CONVERT_PROMPT = `You are an expert academic document editor specialising in citation
-reformatting, bibliography normalisation, and academic style correction.
+const CONVERT_PROMPT = `You are an expert academic document editor specialising in
+citation reformatting, bibliography normalisation, and academic style correction.
 
 The user will provide:
-- The FULL document text (with sections already heuristically or AI-annotated)
+- The FULL document text (or an evidence pack) with annotated citations
 - A TARGET citation style
-- A SCOPE array listing what to convert (any combination of):
-    "citations"     — reformat all inline citations to target style
-    "bibliography"  — reformat all bibliography / reference-list entries
-    "structure"     — normalise section headings to academic conventions
-    "typos"         — fix obvious spelling / typography errors (Russian and English)
-    "syntax"        — fix punctuation, spacing, dash usage (em-dash, en-dash, quotation marks)
+- A SCOPE array (any combination):
+    "citations"    — reformat inline citations to target style
+    "bibliography" — reformat bibliography / reference-list entries
+    "structure"    — normalise section headings to academic conventions
+    "typos"        — fix spelling / typography errors (Russian and English)
+    "syntax"       — fix punctuation, spacing, dashes, quotation marks
 
 Rules:
 - Process ONLY the scope items listed. Do NOT touch anything else.
 - Preserve all non-target text verbatim.
 - Return the FULL converted document in "convertedText".
-- Also return individual bibEntries with "converted" fields.
+- Return individual bibEntries with "converted" fields filled.
 - Set "convertedText" to null only if no changes were needed.
 
-GOST 7.0.5-2008 FORMATTING RULES (apply when targetStyle is "GOST"):
-- Author format: Фамилия И.О. (surname first, then initials with dots, comma-separated for multiple)
+GOST 7.0.5-2008 RULES (apply when targetStyle is "GOST"):
+- Author: Фамилия И.О. — surname first, initials with dots
+  Multiple authors separated by ", "; if >3 authors use first author + " [и др.]"
 - Inline citation: [N] where N is sequential reference number
-- Book entry:     Фамилия И.О. Название. — Место : Издательство, Год. — N с.
-- Journal entry:  Фамилия И.О. Название статьи // Журнал. — Год. — Т. N, № N. — С. N–N. — DOI: 10.xxx (if available)
-- Web resource:   Фамилия И.О. Название [Электронный ресурс]. — URL: https://... (дата обращения: ДД.ММ.ГГГГ).
-- Thesis:         Фамилия И.О. Название : дис. … канд./д-р наук / Учреждение. — Место, Год. — N с.
+- Book:     Фамилия И.О. Название. — Место : Издательство, Год. — N с.
+- Journal:  Фамилия И.О. Название статьи // Журнал. — Год. — Т. N, № N. — С. N–N. — DOI: 10.xxx
+- Web:      Фамилия И.О. Название [Электронный ресурс]. — URL: https://... (дата обращения: ДД.ММ.ГГГГ).
+- Thesis:   Фамилия И.О. Название : дис. … канд./д-р наук / Учреждение. — Место, Год. — N с.
+- Conf:     Фамилия И.О. Название // Сборник трудов конф. — Место, Год. — С. N–N.
 - Use em-dash (—) as separator between bibliographic fields
-- Use Russian guillemets «» for titles when appropriate
+- Use Russian guillemets «» for titles when language is Russian
 - City abbreviations: Москва → М., Санкт-Петербург → СПб., Ленинград → Л.
+- If DOI is present, always include it as last field: DOI: 10.xxxx/xxxx
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -114,68 +225,62 @@ Return ONLY valid JSON — no markdown fences:
       "raw": "original entry",
       "style": "string",
       "converted": "reformatted entry",
-      "fields": { "author":"","year":"","title":"","source":"","publisher":"","place":"","pages":"","doi":"","url":"" },
+      "fields": {
+        "author": "", "year": "", "title": "", "source": "",
+        "publisher": "", "place": "", "pages": "",
+        "doi": "", "url": "", "volume": "", "issue": "", "type": ""
+      },
       "startLine": 1
     }
   ]
 }`;
 
-function detectLang(text: string): "ru" | "en" | "mixed" {
-  const ru = (text.match(/[а-яёА-ЯЁ]/gu) ?? []).length;
-  const en = (text.match(/[a-zA-Z]/gu) ?? []).length;
-  const t = ru + en;
-  if (!t) return "ru";
-  const r = ru / t;
-  return r > 0.7 ? "ru" : r < 0.3 ? "en" : "mixed";
-}
-
-function truncate(rawText: string): string {
-  return rawText.length > MAX_TEXT_CHARS
-    ? rawText.slice(0, MAX_TEXT_CHARS * 0.7) + "\n[...]\n" + rawText.slice(-MAX_TEXT_CHARS * 0.3)
-    : rawText;
-}
-
-async function runGemini(
-  systemPrompt: string,
-  userMsg: string,
-  apiKey: string
-): Promise<{ raw: string; model: string }> {
-  const contents = [
-    { role: "user",  parts: [{ text: systemPrompt }] },
-    { role: "model", parts: [{ text: "Understood. I will return only valid JSON with no markdown fences." }] },
-    { role: "user",  parts: [{ text: userMsg }] },
-  ];
-  return callGemini(contents, { temperature: 0, responseMimeType: "application/json" }, apiKey);
-}
-
-function friendlyError(msg: string): string {
-  if (msg.includes("TimeoutError") || msg.includes("signal timed out"))
-    return "Gemini не ответил за 90 секунд. Попробуйте с более коротким документом.";
-  if (msg.includes("fetch failed") || msg.includes("ENOTFOUND") || msg.includes("ECONNREFUSED"))
-    return "Не удалось подключиться к Gemini API. Проверьте интернет-соединение.";
-  return msg;
-}
-
 // ── POST /api/ai-analyze ───────────────────────────────────────────────────
 export async function handleAiAnalyze(req: Request, res: Response): Promise<void> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    res.status(501).json({ error: "GEMINI_API_KEY не задан. Установите переменную окружения для AI-анализа." });
+    res.status(501).json({
+      error: "GEMINI_API_KEY не задан. Установите переменную окружения для AI-анализа.",
+    });
     return;
   }
 
-  const rawText = typeof req.body?.text === "string" ? req.body.text : "";
-  if (!rawText.trim()) { res.status(400).json({ error: "Текст не передан." }); return; }
+  // Detect request format: Evidence-Pack (new) vs raw text (legacy)
+  const isEvidencePack = (
+    typeof req.body?.heuristicSummary === "object" ||
+    Array.isArray(req.body?.evidence)
+  );
 
-  const language = typeof req.body?.language === "string" ? req.body.language : detectLang(rawText);
-  const text = truncate(rawText);
-  const userMsg = [`Language hint: ${language}`, "---BEGIN---", text, "---END---"].join("\n");
+  let userMsg: string;
+  let language: string;
+
+  if (isEvidencePack) {
+    language = req.body?.heuristicSummary?.language ?? "ru";
+    userMsg  = [
+      `Language hint: ${language}`,
+      buildEvidencePackMsg(req.body as Record<string, unknown>),
+    ].join("\n\n");
+  } else {
+    // Legacy: raw text
+    const rawText = typeof req.body?.text === "string" ? req.body.text : "";
+    if (!rawText.trim()) {
+      res.status(400).json({ error: "Текст не передан." });
+      return;
+    }
+    language = typeof req.body?.language === "string" ? req.body.language : detectLang(rawText);
+    const text = truncate(rawText);
+    userMsg = [`Language hint: ${language}`, "---BEGIN---", text, "---END---"].join("\n");
+  }
 
   try {
-    const { raw, model } = await runGemini(ANALYZE_PROMPT, userMsg, apiKey);
+    const { raw, model, label } = await runGemini(ANALYZE_PROMPT, userMsg, apiKey);
     let parsed: Record<string, unknown> = {};
-    try { parsed = JSON.parse(raw); } catch {
-      throw new Error("Gemini вернул ответ в неожиданном формате. Попробуйте ещё раз или сократите документ.");
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(
+        "Gemini вернул ответ в неожиданном формате. Попробуйте ещё раз или сократите документ.",
+      );
     }
     res.json({
       items:         Array.isArray(parsed.items)      ? parsed.items      : [],
@@ -187,9 +292,11 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
       summary:       typeof parsed.summary === "string" ? parsed.summary : "",
       convertedText: null,
       _model:        model,
+      _label:        label,
     });
   } catch (err) {
-    res.status(502).json({ error: friendlyError(err instanceof Error ? err.message : String(err)) });
+    const msg = friendlyError(err instanceof Error ? err.message : String(err));
+    res.status(502).json({ error: msg });
   }
 }
 
@@ -201,37 +308,73 @@ export async function handleAiConvert(req: Request, res: Response): Promise<void
     return;
   }
 
-  const rawText    = typeof req.body?.text        === "string" ? req.body.text        : "";
-  const targetStyle = typeof req.body?.targetStyle === "string" ? req.body.targetStyle : "";
-  const scope: string[] = Array.isArray(req.body?.scope) ? req.body.scope : ["citations", "bibliography"];
+  const targetStyle: string =
+    typeof req.body?.targetStyle === "string" ? req.body.targetStyle : "";
+  const scope: string[] = Array.isArray(req.body?.scope)
+    ? req.body.scope
+    : ["citations", "bibliography"];
 
-  if (!rawText.trim())    { res.status(400).json({ error: "Текст не передан." }); return; }
-  if (!targetStyle.trim()) { res.status(400).json({ error: "Целевой стиль не указан." }); return; }
+  if (!targetStyle.trim()) {
+    res.status(400).json({ error: "Целевой стиль не указан." });
+    return;
+  }
 
-  const language = typeof req.body?.language === "string" ? req.body.language : detectLang(rawText);
-  const text = truncate(rawText);
+  // Detect Evidence-Pack vs legacy
+  const isEvidencePack = (
+    typeof req.body?.heuristicSummary === "object" ||
+    Array.isArray(req.body?.evidence)
+  );
 
-  // Append language-specific instruction context
-  const langInstruction = language === "ru"
-    ? "The document is in Russian. Apply Russian academic conventions: guillemets «» for quotations, em-dash (—) as bibliographic separator, Cyrillic initials format."
-    : language === "mixed"
-    ? "The document mixes Russian and English. Handle both scripts correctly."
-    : "The document is in English.";
+  let userMsg: string;
+  let language: string;
 
-  const userMsg = [
-    `Language hint: ${language}`,
-    langInstruction,
-    `Target style: ${targetStyle}`,
-    `Scope: ${scope.join(", ")}`,
-    "---BEGIN---",
-    text,
-    "---END---",
-  ].join("\n");
+  if (isEvidencePack) {
+    language = req.body?.heuristicSummary?.language ?? "ru";
+    const packMsg = buildEvidencePackMsg(req.body as Record<string, unknown>);
+    const langInstruction = language === "ru"
+      ? "The document is in Russian. Apply Russian academic conventions."
+      : language === "mixed"
+      ? "The document mixes Russian and English. Handle both scripts correctly."
+      : "The document is in English.";
+    userMsg = [
+      `Language hint: ${language}`,
+      langInstruction,
+      `Target style: ${targetStyle}`,
+      `Scope: ${scope.join(", ")}`,
+      packMsg,
+    ].join("\n\n");
+  } else {
+    // Legacy: raw text
+    const rawText = typeof req.body?.text === "string" ? req.body.text : "";
+    if (!rawText.trim()) {
+      res.status(400).json({ error: "Текст не передан." });
+      return;
+    }
+    language = typeof req.body?.language === "string" ? req.body.language : detectLang(rawText);
+    const text = truncate(rawText);
+    const langInstruction = language === "ru"
+      ? "The document is in Russian. Apply Russian academic conventions: " +
+        "guillemets «» for quotations, em-dash (—) as bibliographic separator, Cyrillic initials format."
+      : language === "mixed"
+      ? "The document mixes Russian and English. Handle both scripts correctly."
+      : "The document is in English.";
+    userMsg = [
+      `Language hint: ${language}`,
+      langInstruction,
+      `Target style: ${targetStyle}`,
+      `Scope: ${scope.join(", ")}`,
+      "---BEGIN---",
+      text,
+      "---END---",
+    ].join("\n");
+  }
 
   try {
-    const { raw, model } = await runGemini(CONVERT_PROMPT, userMsg, apiKey);
+    const { raw, model, label } = await runGemini(CONVERT_PROMPT, userMsg, apiKey);
     let parsed: Record<string, unknown> = {};
-    try { parsed = JSON.parse(raw); } catch {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
       throw new Error("Gemini вернул ответ в неожиданном формате.");
     }
     res.json({
@@ -242,8 +385,20 @@ export async function handleAiConvert(req: Request, res: Response): Promise<void
       summary:       typeof parsed.summary === "string" ? parsed.summary : "",
       convertedText: typeof parsed.convertedText === "string" ? parsed.convertedText : null,
       _model:        model,
+      _label:        label,
     });
   } catch (err) {
-    res.status(502).json({ error: friendlyError(err instanceof Error ? err.message : String(err)) });
+    const msg = friendlyError(err instanceof Error ? err.message : String(err));
+    res.status(502).json({ error: msg });
   }
+}
+
+// ── Model info endpoint helper (for debugging / health checks) ─────────────
+export function getModelInfo(): { models: { id: string; label: string }[] } {
+  return {
+    models: ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"].map((id) => ({
+      id,
+      label: modelLabel(id),
+    })),
+  };
 }
