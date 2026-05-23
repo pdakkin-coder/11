@@ -1,10 +1,10 @@
 /**
  * geminiRouter.ts — Gemini model cascade with circuit-breaker
  *
- * Cascade order (real model IDs, verified 2026-05-23):
- *   1. gemini-2.5-flash    — 10 RPM, 500 RPD  (primary)
- *   2. gemini-1.5-flash    — 15 RPM, 1500 RPD (fallback-1)
- *   3. gemini-1.5-flash-8b — 15 RPM, 1500 RPD (fallback-2)
+ * Cascade order (as of 2026-05-21, free-tier AI Studio limits):
+ *   1. gemini-2.5-flash       —  5 RPM,  20 RPD  (primary)
+ *   2. gemini-3.5-flash       —  5 RPM,  20 RPD  (fallback-1)
+ *   3. gemini-3.1-flash-lite  — 15 RPM, 500 RPD  (fallback-2)
  *
  * On 429 / 404 / network error: advance to next model in cascade.
  * On 503:                        retry within same model (max 2 retries).
@@ -12,7 +12,8 @@
  *
  * Circuit-breaker per model:
  *   After CIRCUIT_TRIP_COUNT consecutive failures (any HTTP error),
- *   the model is skipped for CIRCUIT_RESET_MS ms.
+ *   the model is skipped for CIRCUIT_RESET_MS ms to avoid hammering a
+ *   broken endpoint and wasting quota on other models.
  */
 
 // ── Model registry ─────────────────────────────────────────────────────────
@@ -25,9 +26,9 @@ export interface ModelMeta {
 }
 
 export const MODEL_REGISTRY: ModelMeta[] = [
-  { id: "gemini-2.5-flash",    label: "Gemini 2.5 Flash",    rpm: 10, rpd:  500 },
-  { id: "gemini-1.5-flash",    label: "Gemini 1.5 Flash",    rpm: 15, rpd: 1500 },
-  { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash 8B", rpm: 15, rpd: 1500 },
+  { id: "gemini-2.5-flash",      label: "Gemini 2.5 Flash",      rpm:  5, rpd:   20 },
+  { id: "gemini-3.5-flash",      label: "Gemini 3.5 Flash",      rpm:  5, rpd:   20 },
+  { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite", rpm: 15, rpd:  500 },
 ];
 
 export const MODELS = MODEL_REGISTRY.map((m) => m.id) as
@@ -45,14 +46,14 @@ export function modelLabel(modelId: string): string {
 const API_VERSION        = "v1beta";
 const FETCH_TIMEOUT_MS   = 90_000;
 const RETRY_DELAYS_MS    = [1_500, 4_000] as const;
-const CIRCUIT_TRIP_COUNT = 3;
-const CIRCUIT_RESET_MS   = 60_000;
+const CIRCUIT_TRIP_COUNT = 3;      // consecutive failures before tripping
+const CIRCUIT_RESET_MS   = 60_000; // how long a tripped model is skipped (ms)
 
 // ── Circuit-breaker state ──────────────────────────────────────────────────
 
 interface CircuitState {
   failures:     number;
-  trippedUntil: number;
+  trippedUntil: number; // epoch ms; 0 = not tripped
 }
 
 const circuitMap = new Map<string, CircuitState>();
@@ -151,9 +152,8 @@ async function callGeminiModel(
 
 /**
  * Try one model with up to RETRY_DELAYS_MS.length retries.
- * Retries ONLY on 503 (service unavailable).
- * 429, 404, and network errors are thrown immediately so callGemini
- * can advance the cascade.
+ * Retries ONLY on 503 (transient server error).
+ * 429, 404, network errors are thrown immediately so callGemini can advance cascade.
  */
 async function tryModel(
   contents: object[],
@@ -197,7 +197,7 @@ export interface GeminiResult {
 /**
  * Main cascade: walk MODELS[], advance on:
  *   - 429  quota exceeded
- *   - 404  model not found (wrong name)
+ *   - 404  model not found
  *   - undefined status  network / DNS error
  * Non-advanceable errors (400, 500…) are thrown immediately.
  */
@@ -225,7 +225,7 @@ export async function callGemini(
         recordFailure(model);
         continue;
       }
-      // Hard errors (400, 500…) — stop immediately, don't waste quota
+      // Hard errors (400, 500…) — stop immediately
       throw e;
     }
   }
