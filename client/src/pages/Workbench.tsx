@@ -110,13 +110,9 @@ const CONVERT_SCOPE_OPTIONS: { id: string; label: string; description: string }[
 // Section entry — normalised shape used in Structure panel
 // ─────────────────────────────────────────────────────────────────────────────
 interface SectionEntry {
-  /** Display heading text */
   heading: string;
-  /** Outline level (1 = top-level) */
   level: number;
-  /** 1-based line number in the document */
   startLine: number;
-  /** Origin: heuristic analyzeStructure or AI response */
   source: "heuristic" | "ai";
 }
 
@@ -268,7 +264,6 @@ export default function Workbench() {
   const [aiTargetStyle, setAiTargetStyle] = useState<CitationStyle | null>(null);
   const [convertScope, setConvertScope] = useState<string[]>(["citations", "bibliography"]);
   const [convertTargetStyle, setConvertTargetStyle] = useState<CitationStyle>("APA");
-  // AI-enriched sections — merged with heuristic after successful AI analysis
   const [aiSections, setAiSections] = useState<SectionEntry[] | null>(null);
 
   // AI hooks
@@ -324,13 +319,9 @@ export default function Workbench() {
     readingMinutes:   Math.max(1, Math.round(countWords(text) / 180)),
   }), [text, structure.paragraphs]);
 
-  // ── Normalised sections for the Structure panel ───────────────────────────
-  // Priority: aiSections (if available) merged on top of heuristic sections.
-  // Heuristic sections keep source="heuristic"; AI-only additions get source="ai".
   const displaySections = useMemo((): SectionEntry[] => {
-    // Map heuristic headings to SectionEntry
     const heuristicSections: SectionEntry[] = structure.sections.map((h) => ({
-      heading:   h.text,          // fix: the field is .text, not .heading
+      heading:   h.text,
       level:     h.level,
       startLine: h.line,
       source:    "heuristic" as const,
@@ -338,16 +329,13 @@ export default function Workbench() {
 
     if (!aiSections || aiSections.length === 0) return heuristicSections;
 
-    // Merge: keep heuristic sections, overlay AI sections by startLine
     const hLines = new Set(heuristicSections.map((s) => s.startLine));
     const merged: SectionEntry[] = [...heuristicSections];
 
     for (const aiSec of aiSections) {
       if (!hLines.has(aiSec.startLine)) {
-        // AI found a section the heuristic missed
         merged.push({ ...aiSec, source: "ai" });
       } else {
-        // AI confirms heuristic section — upgrade heading text if AI provides richer label
         const idx = merged.findIndex((s) => s.startLine === aiSec.startLine);
         if (idx !== -1 && aiSec.heading && aiSec.heading.length > merged[idx].heading.length) {
           merged[idx] = { ...merged[idx], heading: aiSec.heading, source: "ai" };
@@ -358,19 +346,16 @@ export default function Workbench() {
     return merged.sort((a, b) => a.startLine - b.startLine);
   }, [structure.sections, aiSections]);
 
-  // Segments for the annotated read-only viewer
   const currentText = preview?.text ?? text;
   const annotationSegments = useMemo(
     () => buildAnnotationSegments(currentText, found, issues),
     [currentText, found, issues],
   );
 
-  // ── Derived AI status ─────────────────────────────────────────────────────
   const aiStatusOk      = !aiLoading && !!aiData && !aiError;
   const activeModelLabel = aiConvertModel ?? aiAnalyzeModel;
   const activeRetries    = aiConvertRetries > 0 ? aiConvertRetries : aiAnalyzeRetries;
 
-  // ── Scroll annotation span into view when panel card is clicked ──────────
   function scrollToItem(itemId: string) {
     const el = spanRefs.current.get(itemId);
     if (el) {
@@ -408,9 +393,6 @@ export default function Workbench() {
 
     if (result.items?.length) setAiFound(result.items as FoundItem[]);
 
-    // ── Extract AI sections from result and store them ────────────────────
-    // AI response may contain sections[] or structureSections[] arrays.
-    // Both shapes are normalised here into SectionEntry[].
     const rawSections: unknown =
       (result as Record<string, unknown>).sections ??
       (result as Record<string, unknown>).structureSections ?? null;
@@ -447,11 +429,26 @@ export default function Workbench() {
           : "") + ".",
     });
 
-    // Auto-switch to structure panel so user sees the result immediately
     setPanel("structure");
   }
 
-  // ── AI: conversion via useAiConvert ──────────────────────────────────────
+  // ── AI: conversion ────────────────────────────────────────────────────────
+  //
+  // Strategy (в порядке приоритета):
+  //
+  // 1. Точечная замена через applySelectiveConversion — используется когда
+  //    сервер вернул items[] с заменами (start/end/text). Изменяются только
+  //    найденные фрагменты, остальной текст не трогается.
+  //
+  // 2. Прямое применение convertedText — fallback когда items[] пуст, но
+  //    convertedText присутствует (случай bibliography-only scope: сервер
+  //    переписывает весь документ целиком и не возвращает items).
+  //    Документ показывается через setPreview → пользователь видит жёлтую
+  //    полосу «Предпросмотр» и может принять или отменить.
+  //
+  // Без этого fallback конвертация была «успешной» (200 OK), но текст в UI
+  // оставался неизменным, т.к. applySelectiveConversion([]) возвращает
+  // оригинал как есть.
   async function handleAiConvert() {
     if (!text.trim() || convertScope.length === 0) return;
 
@@ -490,39 +487,58 @@ export default function Workbench() {
 
     if (result.items?.length) setAiFound(result.items as FoundItem[]);
 
-    if (result.convertedText?.trim()) {
-      const selectiveText = applySelectiveConversion(
-        text,
-        found
-          .map((item) => {
-            const replacement = result.items?.find((aiItem) =>
-              aiItem.start === item.start &&
-              aiItem.end === item.end &&
-              typeof aiItem.text === "string" &&
-              aiItem.text.trim() &&
-              aiItem.text !== item.text
-            );
-            return replacement
-              ? { start: item.start, end: item.end, text: replacement.text }
-              : null;
-          })
-          .filter((item): item is { start: number; end: number; text: string } => item !== null),
-      );
-      setText(selectiveText);
-      setDraft(selectiveText);
-      setPreview(null);
-      setAiTargetStyle(convertTargetStyle);
-      const modelNote = result._label ? ` — ${result._label}` : "";
-      toast({
-        title: "AI-конвертация применена",
-        description: `Документ переформатирован: ${convertScope.join(", ")} → ${convertTargetStyle}${modelNote}. Заменены только ссылки и библиография.`,
-      });
-    } else {
+    if (!result.convertedText?.trim()) {
+      // Сервер ответил 200 но не вернул текст — информируем
       toast({
         title: "AI-конвертация завершена",
         description: result.summary || "Изменений не потребовалось или Gemini не вернул текст.",
       });
+      return;
     }
+
+    const modelNote = result._label ? ` — ${result._label}` : "";
+
+    // ── Путь 1: точечная замена через items[] ──────────────────────────────
+    const replacements = (result.items ?? []).map((aiItem) => {
+      const match = found.find(
+        (item) =>
+          item.start === aiItem.start &&
+          item.end   === aiItem.end   &&
+          typeof aiItem.text === "string" &&
+          aiItem.text.trim() &&
+          aiItem.text !== item.text,
+      );
+      return match
+        ? { start: match.start, end: match.end, text: aiItem.text as string }
+        : null;
+    }).filter((x): x is { start: number; end: number; text: string } => x !== null);
+
+    if (replacements.length > 0) {
+      // Есть конкретные замены — применяем хирургически
+      const patched = applySelectiveConversion(text, replacements);
+      setText(patched);
+      setDraft(patched);
+      setPreview(null);
+      setAiTargetStyle(convertTargetStyle);
+      toast({
+        title: "AI-конвертация применена",
+        description:
+          `Заменено элементов: ${replacements.length}. Стиль → ${convertTargetStyle}${modelNote}.`,
+      });
+      return;
+    }
+
+    // ── Путь 2: fallback — показываем convertedText через Preview ─────────
+    // items[] пуст (bibliography-scope, full-rewrite и т.п.) — показываем
+    // весь переписанный документ в режиме предпросмотра, не применяя сразу.
+    setPreview({ target: convertTargetStyle, text: result.convertedText });
+    setAiTargetStyle(convertTargetStyle);
+    toast({
+      title: `Предпросмотр конвертации → ${convertTargetStyle}${modelNote}`,
+      description:
+        (result.summary ?? `Документ переконвертирован: ${convertScope.join(", ")}.`) +
+        " Нажмите «Применить» в жёлтой полосе чтобы сохранить изменения.",
+    });
   }
 
   const filteredFound = useMemo(() => {
@@ -1007,7 +1023,6 @@ export default function Workbench() {
                     <Badge variant="outline" className="text-[10px]">{displaySections.length} разд.</Badge>
                   </div>
 
-                  {/* Language + paragraph stats */}
                   <div className="flex gap-2">
                     <Badge variant="secondary" className="text-[10px] gap-1">
                       <Type className="h-3 w-3" />{structure.language === "ru" ? "RU" : structure.language === "en" ? "EN" : "RU+EN"}
@@ -1022,7 +1037,6 @@ export default function Workbench() {
                     )}
                   </div>
 
-                  {/* Section list */}
                   {displaySections.length === 0 ? (
                     <div className="space-y-2 pt-1">
                       <p className="text-xs text-muted-foreground">
@@ -1043,20 +1057,15 @@ export default function Workbench() {
                           style={{ paddingLeft: `${(sec.level - 1) * 12 + 8}px` }}
                           title={`Строка ${sec.startLine}${sec.source === "ai" ? " · AI" : ""}`}
                         >
-                          {/* Level indicator */}
                           <span
                             className="text-[10px] text-muted-foreground mt-0.5 shrink-0 w-3 text-right select-none"
                             aria-label={`Уровень ${sec.level}`}
                           >
                             {sec.level}
                           </span>
-
-                          {/* Heading text */}
                           <span className="text-xs leading-snug break-words min-w-0 flex-1 text-foreground">
                             {sec.heading}
                           </span>
-
-                          {/* Right-side metadata */}
                           <div className="flex items-center gap-1 shrink-0 ml-1">
                             {sec.source === "ai" && (
                               <Badge
@@ -1068,37 +1077,12 @@ export default function Workbench() {
                               </Badge>
                             )}
                             <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">
-                              {sec.startLine}
+                              стр. {sec.startLine}
                             </span>
                           </div>
                         </div>
                       ))}
                     </div>
-                  )}
-
-                  {/* Bib / footnotes summary */}
-                  {(structure.bibCount > 0 || structure.footnoteCount > 0) && (
-                    <div className="pt-1 border-t space-y-0.5">
-                      {structure.bibCount > 0 && (
-                        <p className="text-[11px] text-muted-foreground flex gap-1.5 items-center">
-                          <span className="legend-dot-bib w-2 h-2 rounded-full shrink-0" />
-                          Библиографических записей: <span className="font-medium text-foreground">{structure.bibCount}</span>
-                        </p>
-                      )}
-                      {structure.footnoteCount > 0 && (
-                        <p className="text-[11px] text-muted-foreground flex gap-1.5 items-center">
-                          <span className="legend-dot-footnote w-2 h-2 rounded-full shrink-0" />
-                          Строк сносок: <span className="font-medium text-foreground">{structure.footnoteCount}</span>
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Prompt to run AI analysis if not done yet */}
-                  {!aiData && displaySections.length > 0 && (
-                    <p className="text-[11px] text-muted-foreground pt-1">
-                      Запустите <span className="font-medium text-foreground">AI-анализ</span> для уточнённого распознавания разделов.
-                    </p>
                   )}
                 </div>
               )}
@@ -1108,70 +1092,69 @@ export default function Workbench() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <h2 className="text-sm font-semibold">Цитаты и сноски</h2>
-                    <Badge variant="outline" className="text-[10px]">{found.length}</Badge>
+                    <Badge variant="outline" className="text-[10px]">{found.length} эл.</Badge>
                   </div>
-                  <div className="relative">
-                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+
+                  <div className="flex gap-1.5">
                     <Input
                       placeholder="Поиск…"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      className="pl-8 h-8 text-xs"
+                      className="h-7 text-xs flex-1"
                     />
+                    <Select value={typeFilter} onValueChange={setTypeFilter}>
+                      <SelectTrigger className="h-7 w-[110px] text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all" className="text-xs">Все типы</SelectItem>
+                        {Object.entries(TYPE_LABELS).map(([k, v]) => (
+                          <SelectItem key={k} value={k} className="text-xs">{v}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
-                  <Select value={typeFilter} onValueChange={setTypeFilter}>
-                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">Все типы</SelectItem>
-                      {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([type, label]) => (
-                        <SelectItem key={type} value={type}>{label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <div className="flex flex-wrap gap-x-3 gap-y-1">
-                    {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([type, label]) => (
-                      <span key={type} className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${legendDotClass(type)}`} />
-                        {label}
-                      </span>
-                    ))}
-                  </div>
+
                   {filteredFound.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">Ничего не найдено.</p>
+                    <p className="text-xs text-muted-foreground pt-1">
+                      {found.length === 0
+                        ? "Цитат не обнаружено. Попробуйте загрузить другой документ."
+                        : "Нет совпадений с фильтром."}
+                    </p>
                   ) : (
-                    <div className="space-y-1">
+                    <div className="space-y-1.5">
                       {filteredFound.map((item) => {
                         const isSelected = selected?.start === item.start && selected?.end === item.end;
-                        const isHovered  = hoveredId === item.id;
                         return (
-                          <div
+                          <button
                             key={item.id}
-                            className={`p-2 rounded-md border text-xs cursor-pointer transition-colors ${
+                            type="button"
+                            className={`w-full text-left rounded-md px-3 py-2 text-xs transition-colors border ${
                               isSelected
-                                ? "border-primary bg-primary/5"
-                                : isHovered
-                                ? "border-muted-foreground/40 bg-muted/40"
-                                : "border-transparent hover:border-muted-foreground/20 hover:bg-muted/20"
+                                ? "bg-primary/10 border-primary/30"
+                                : "hover:bg-muted border-transparent hover:border-border"
                             }`}
-                            onMouseEnter={() => setHoveredId(item.id)}
-                            onMouseLeave={() => setHoveredId(null)}
                             onClick={() => handlePanelItemClick(item.id, item.start, item.end)}
                           >
                             <div className="flex items-center gap-1.5 mb-0.5">
-                              <span className={`w-2 h-2 rounded-full shrink-0 ${legendDotClass(item.type)}`} />
-                              <span className="font-medium text-[10px] uppercase tracking-wide text-muted-foreground">{TYPE_LABELS[item.type]}</span>
+                              <span className={`legend-dot ${legendDotClass(item.type)}`} />
+                              <span className="font-medium">{TYPE_LABELS[item.type]}</span>
                               {item.source && item.source !== "heuristic" && (
-                                <Badge variant="secondary" className="text-[9px] px-1 py-0 h-3.5 ml-0.5">
-                                  {item.source === "ai" ? "AI" : "⊙"}
+                                <Badge variant="outline" className="text-[9px] px-1 py-0 h-3.5">
+                                  {item.source === "ai" ? "AI" : "✓"}
                                 </Badge>
                               )}
                               {item.confidence !== undefined && (
-                                <span className="ml-auto text-[10px] text-muted-foreground">{Math.round(item.confidence * 100)}%</span>
+                                <span className="ml-auto text-[10px] text-muted-foreground">
+                                  {Math.round(item.confidence * 100)}%
+                                </span>
                               )}
                             </div>
-                            <p className="truncate">{item.text}</p>
-                            {item.note && <p className="text-muted-foreground truncate">{item.note}</p>}
-                          </div>
+                            <div className="text-muted-foreground truncate">{item.text}</div>
+                            {item.note && (
+                              <div className="text-[10px] text-muted-foreground/70 mt-0.5 truncate">{item.note}</div>
+                            )}
+                          </button>
                         );
                       })}
                     </div>
@@ -1183,138 +1166,132 @@ export default function Workbench() {
               {panel === "style" && (
                 <div className="space-y-4">
                   <h2 className="text-sm font-semibold">Стиль цитирования</h2>
-                  <div className="p-3 rounded-lg bg-muted/50 space-y-1">
-                    <p className="text-xs text-muted-foreground">Обнаруженный стиль</p>
-                    <p className="text-sm font-semibold">{detected.style}</p>
-                    <p className="text-xs text-muted-foreground">Уверенность: {Math.round(detected.confidence * 100)}%</p>
-                    {aiData?.detectedStyle && aiData.detectedStyle !== detected.style && (
-                      <p className="text-xs text-primary">
-                        AI уточняет: {aiData.detectedStyle}
-                        {" "}({Math.round((aiData.confidence ?? 0) * 100)}%)
+
+                  <div className="rounded-lg border p-3 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium">Обнаруженный стиль</span>
+                      <Badge>{detected.style}</Badge>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="h-1.5 flex-1 bg-muted rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-primary rounded-full transition-all"
+                          style={{ width: `${Math.round(detected.confidence * 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-[10px] text-muted-foreground w-8 text-right">
+                        {Math.round(detected.confidence * 100)}%
+                      </span>
+                    </div>
+                    {aiData && (
+                      <p className="text-[10px] text-muted-foreground">
+                        AI: {aiData.detectedStyle} ({Math.round((aiData.confidence ?? 0) * 100)}%)
                       </p>
                     )}
                   </div>
-                  {detected.notes.length > 0 && (
-                    <div className="space-y-1">
-                      {detected.notes.map((n, i) => (
-                        <p key={i} className="text-xs text-muted-foreground flex gap-1.5">
-                          <span className="text-primary mt-0.5">•</span>{n}
-                        </p>
+
+                  <div className="space-y-2">
+                    <Label className="text-xs font-medium">Быстрая конвертация (эвристика)</Label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(["APA", "Chicago", "MLA", "GOST"] as CitationStyle[]).map((style) => (
+                        <Button
+                          key={style}
+                          variant={detected.style === style ? "default" : "outline"}
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={() => {
+                            const converted = convertCitations(text, found, style, customRules);
+                            setPreview({ target: style, text: converted });
+                          }}
+                        >
+                          {style}
+                        </Button>
                       ))}
                     </div>
-                  )}
+                  </div>
                 </div>
               )}
 
               {/* ── Convert panel ───────────────────────────────────────── */}
               {panel === "convert" && (
                 <div className="space-y-4">
-                  <h2 className="text-sm font-semibold">Конвертация</h2>
-
-                  <div className="space-y-2">
-                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">Эвристическая</p>
-                    <Select
-                      onValueChange={(v) => {
-                        const result = convertCitations(text, v as CitationStyle);
-                        setPreview({ target: v as CitationStyle, text: result });
-                      }}
-                    >
-                      <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Выберите стиль…" /></SelectTrigger>
-                      <SelectContent>
-                        {(["APA", "Chicago", "MLA", "IEEE", "Vancouver", "Harvard", "GOST"] as CitationStyle[]).map((s) => (
-                          <SelectItem key={s} value={s}>{s}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    {preview && (
-                      <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                        Предпросмотр активен — подтвердите в документе.
-                      </p>
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">AI-конвертация</h2>
+                    {aiConvertModel && (
+                      <Badge variant="outline" className="text-[10px] gap-1">
+                        <Cpu className="h-2.5 w-2.5" />{aiConvertModel}
+                      </Badge>
                     )}
                   </div>
 
-                  <Separator />
-
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">AI-конвертация (Gemini)</p>
-                      {aiConvertModel && (
-                        <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 gap-1">
-                          <Cpu className="h-2.5 w-2.5" />{aiConvertModel}
-                        </Badge>
-                      )}
-                    </div>
-
-                    <div className="space-y-1">
-                      <Label className="text-xs">Целевой стиль</Label>
-                      <Select value={convertTargetStyle} onValueChange={(v) => setConvertTargetStyle(v as CitationStyle)}>
-                        <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {(["APA", "Chicago", "MLA", "IEEE", "Vancouver", "Harvard", "GOST"] as CitationStyle[]).map((s) => (
-                            <SelectItem key={s} value={s}>{s}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <div className="space-y-1">
-                      <Label className="text-xs">Что конвертировать</Label>
-                      <div className="space-y-1.5">
-                        {CONVERT_SCOPE_OPTIONS.map((opt) => (
-                          <div key={opt.id} className="flex items-start gap-2">
-                            <Checkbox
-                              id={`scope-${opt.id}`}
-                              checked={convertScope.includes(opt.id)}
-                              onCheckedChange={() => toggleScope(opt.id)}
-                              className="mt-0.5"
-                            />
-                            <label htmlFor={`scope-${opt.id}`} className="text-xs cursor-pointer">
-                              <span className="font-medium">{opt.label}</span>
-                              <span className="text-muted-foreground"> — {opt.description}</span>
-                            </label>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <Button
-                      size="sm"
-                      className="w-full h-8 text-xs"
-                      onClick={handleAiConvert}
-                      disabled={aiConvertLoading || !text.trim() || convertScope.length === 0}
-                      data-testid="button-ai-convert"
+                  <div className="space-y-2">
+                    <Label className="text-xs">Целевой стиль</Label>
+                    <Select
+                      value={convertTargetStyle}
+                      onValueChange={(v) => setConvertTargetStyle(v as CitationStyle)}
                     >
-                      <Zap className="h-3.5 w-3.5 mr-1.5" />
-                      {aiConvertLoading
-                        ? aiConvertRetries > 0
-                          ? `Повторная попытка ${aiConvertRetries}…`
-                          : "Конвертация…"
-                        : `AI-конвертация (${convertScope.length})`}
-                    </Button>
-                    <p className="text-[10px] text-muted-foreground">
-                      Gemini переформатирует выбранные блоки. Результат применяется к документу — проверьте вручную.
-                    </p>
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(["APA", "Chicago", "MLA", "GOST", "IEEE", "Vancouver", "Harvard"] as CitationStyle[]).map((s) => (
+                          <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
-
-                  <Separator />
 
                   <div className="space-y-2">
-                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide font-medium">Авторский шаблон</p>
+                    <Label className="text-xs">Область конвертации</Label>
                     <div className="space-y-1.5">
-                      <div>
-                        <Label className="text-[10px]">Название стиля</Label>
-                        <Input className="h-7 text-xs mt-0.5" value={customRules.name} onChange={(e) => setCustomRules((r) => ({ ...r, name: e.target.value }))} />
-                      </div>
-                      <div>
-                        <Label className="text-[10px]">Шаблон вставки</Label>
-                        <Input className="h-7 text-xs mt-0.5 font-mono" value={customRules.inlineTemplate} onChange={(e) => setCustomRules((r) => ({ ...r, inlineTemplate: e.target.value }))} />
-                      </div>
-                      <div>
-                        <Label className="text-[10px]">Шаблон библиографии</Label>
-                        <Input className="h-7 text-xs mt-0.5 font-mono" value={customRules.bibliographyTemplate} onChange={(e) => setCustomRules((r) => ({ ...r, bibliographyTemplate: e.target.value }))} />
-                      </div>
+                      {CONVERT_SCOPE_OPTIONS.map((opt) => (
+                        <div key={opt.id} className="flex items-center gap-2">
+                          <Checkbox
+                            id={`scope-${opt.id}`}
+                            checked={convertScope.includes(opt.id)}
+                            onCheckedChange={() => toggleScope(opt.id)}
+                            className="h-3.5 w-3.5"
+                          />
+                          <label htmlFor={`scope-${opt.id}`} className="text-xs cursor-pointer flex-1">
+                            <span className="font-medium">{opt.label}</span>
+                            <span className="text-muted-foreground ml-1">— {opt.description}</span>
+                          </label>
+                        </div>
+                      ))}
                     </div>
                   </div>
+
+                  <Button
+                    className="w-full h-9 text-sm"
+                    onClick={handleAiConvert}
+                    disabled={aiConvertLoading || convertScope.length === 0 || !text.trim()}
+                  >
+                    {aiConvertLoading ? (
+                      <><RefreshCw className="h-4 w-4 mr-2 animate-spin" />Конвертация…</>
+                    ) : (
+                      <><Sparkles className="h-4 w-4 mr-2" />Конвертировать через Gemini</>
+                    )}
+                  </Button>
+
+                  {aiConvertData && !aiConvertLoading && (
+                    <div className="rounded-md border p-3 space-y-1.5 text-xs">
+                      <p className="font-medium">Результат конвертации</p>
+                      {aiConvertData.summary && (
+                        <p className="text-muted-foreground">{aiConvertData.summary}</p>
+                      )}
+                      {aiConvertData.bibEntries?.length > 0 && (
+                        <p className="text-muted-foreground">
+                          Библиография: {aiConvertData.bibEntries.length} записей
+                          {aiConvertData.bibEntries.filter((e) => e.converted).length > 0 &&
+                            ` (${aiConvertData.bibEntries.filter((e) => e.converted).length} сконвертировано)`
+                          }
+                        </p>
+                      )}
+                      {aiConvertData._label && (
+                        <p className="text-[10px] text-muted-foreground/70">Модель: {aiConvertData._label}</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1323,40 +1300,37 @@ export default function Workbench() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <h2 className="text-sm font-semibold">Редактура</h2>
-                    <Badge variant={issues.length > 0 ? "destructive" : "secondary"} className="text-[10px]">{issues.length}</Badge>
+                    <Badge variant={issues.length > 0 ? "destructive" : "secondary"} className="text-[10px]">
+                      {issues.length} замеч.
+                    </Badge>
                   </div>
+
                   {issues.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">Замечаний не найдено.</p>
+                    <p className="text-xs text-muted-foreground">Замечаний не обнаружено.</p>
                   ) : (
-                    <div className="space-y-1">
-                      {issues.map((issue) => {
-                        const issueItemId = "issue-" + issue.id;
-                        const isSelected  = selected?.start === issue.start && selected?.end === issue.end;
-                        const isHovered   = hoveredId === issueItemId;
+                    <div className="space-y-1.5">
+                      {issues.map((iss) => {
+                        const isSelected = selected?.start === iss.start && selected?.end === iss.end;
                         return (
-                          <div
-                            key={issue.id}
-                            className={`p-2 rounded-md border transition-colors cursor-pointer ${
+                          <button
+                            key={iss.id}
+                            type="button"
+                            className={`w-full text-left rounded-md px-3 py-2 text-xs transition-colors border ${
                               isSelected
-                                ? "border-destructive/60 bg-destructive/8"
-                                : isHovered
-                                ? "border-destructive/40 bg-destructive/5"
-                                : "border-transparent hover:border-destructive/30 hover:bg-destructive/5"
+                                ? "bg-destructive/10 border-destructive/30"
+                                : "hover:bg-muted border-transparent hover:border-border"
                             }`}
-                            onMouseEnter={() => setHoveredId(issueItemId)}
-                            onMouseLeave={() => setHoveredId(null)}
-                            onClick={() => handlePanelItemClick(issueItemId, issue.start, issue.end)}
+                            onClick={() => handlePanelItemClick("issue-" + iss.id, iss.start, iss.end)}
                           >
                             <div className="flex items-center gap-1.5 mb-0.5">
                               <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />
-                              <span className="text-[10px] uppercase tracking-wide font-medium text-destructive">{ISSUE_LABELS[issue.type]}</span>
-                              <span className="ml-auto text-[10px] text-muted-foreground">стр. {issue.line}</span>
+                              <span className="font-medium">{ISSUE_LABELS[iss.type]}</span>
                             </div>
-                            <p className="text-xs truncate">{issue.text}</p>
-                            {issue.suggestion && (
-                              <p className="text-[10px] text-muted-foreground mt-0.5 truncate">→ {issue.suggestion}</p>
+                            <div className="text-muted-foreground truncate">{iss.text}</div>
+                            {iss.suggestion && (
+                              <div className="text-[10px] text-primary/80 mt-0.5 truncate">→ {iss.suggestion}</div>
                             )}
-                          </div>
+                          </button>
                         );
                       })}
                     </div>
@@ -1369,19 +1343,25 @@ export default function Workbench() {
                 <div className="space-y-3">
                   <h2 className="text-sm font-semibold">Статистика</h2>
                   <div className="grid grid-cols-2 gap-2">
-                    {([
-                      ["Слов",              stats.words],
-                      ["Знаков (с пробелами)", stats.charsWithSpaces],
-                      ["Знаков (без пробелов)", stats.charsNoSpaces],
-                      ["Абзацев",           stats.paragraphs],
-                      ["Строк",             stats.lines],
-                      ["Время чтения",      `~${stats.readingMinutes} мин`],
-                    ] as [string, string | number][]).map(([label, val]) => (
-                      <div key={label} className="p-2 rounded-md bg-muted/50">
-                        <p className="text-[10px] text-muted-foreground">{label}</p>
-                        <p className="text-sm font-semibold">{val}</p>
+                    {[
+                      { label: "Слов",          value: stats.words },
+                      { label: "Знаков (с пр.)", value: stats.charsWithSpaces },
+                      { label: "Знаков (без)",   value: stats.charsNoSpaces },
+                      { label: "Абзацев",        value: stats.paragraphs },
+                      { label: "Строк",          value: stats.lines },
+                      { label: "Мин. чтения",    value: stats.readingMinutes },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="rounded-md border p-2.5 text-center">
+                        <div className="text-lg font-bold tabular-nums">{value.toLocaleString("ru")}</div>
+                        <div className="text-[10px] text-muted-foreground mt-0.5">{label}</div>
                       </div>
                     ))}
+                  </div>
+                  <Separator />
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p>Цитат найдено: <span className="text-foreground font-medium">{found.length}</span></p>
+                    <p>Замечаний редактора: <span className="text-foreground font-medium">{issues.length}</span></p>
+                    <p>Разделов: <span className="text-foreground font-medium">{displaySections.length}</span></p>
                   </div>
                 </div>
               )}
