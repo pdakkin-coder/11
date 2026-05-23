@@ -1,34 +1,33 @@
 /**
  * geminiRouter.ts — Gemini model cascade with circuit-breaker
  *
- * Cascade order (as of 2026-05-21, free-tier AI Studio limits):
- *   1. gemini-2.5-flash       —  5 RPM,  20 RPD  (primary)
- *   2. gemini-3.5-flash       —  5 RPM,  20 RPD  (fallback-1)
- *   3. gemini-3.1-flash-lite  — 15 RPM, 500 RPD  (fallback-2)
+ * Cascade order (real model IDs, verified 2026-05-23):
+ *   1. gemini-2.5-flash    — 10 RPM, 500 RPD  (primary)
+ *   2. gemini-1.5-flash    — 15 RPM, 1500 RPD (fallback-1)
+ *   3. gemini-1.5-flash-8b — 15 RPM, 1500 RPD (fallback-2)
  *
- * On 429:                  advance to next model in cascade.
- * On 503 / network error:  retry within same model (max 2 retries).
- * All models exhausted:    throw with UTC-midnight RPD reset hint.
+ * On 429 / 404 / network error: advance to next model in cascade.
+ * On 503:                        retry within same model (max 2 retries).
+ * All models exhausted:          throw with UTC-midnight RPD reset hint.
  *
  * Circuit-breaker per model:
  *   After CIRCUIT_TRIP_COUNT consecutive failures (any HTTP error),
- *   the model is skipped for CIRCUIT_RESET_MS ms to avoid hammering a
- *   broken endpoint and wasting quota on other models.
+ *   the model is skipped for CIRCUIT_RESET_MS ms.
  */
 
 // ── Model registry ─────────────────────────────────────────────────────────
 
 export interface ModelMeta {
   id:    string;
-  label: string; // Human-readable label for UI badge
+  label: string;
   rpm:   number;
   rpd:   number;
 }
 
 export const MODEL_REGISTRY: ModelMeta[] = [
-  { id: "gemini-2.5-flash",      label: "Gemini 2.5 Flash",      rpm:  5, rpd:   20 },
-  { id: "gemini-3.5-flash",      label: "Gemini 3.5 Flash",      rpm:  5, rpd:   20 },
-  { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite", rpm: 15, rpd:  500 },
+  { id: "gemini-2.5-flash",    label: "Gemini 2.5 Flash",    rpm: 10, rpd:  500 },
+  { id: "gemini-1.5-flash",    label: "Gemini 1.5 Flash",    rpm: 15, rpd: 1500 },
+  { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash 8B", rpm: 15, rpd: 1500 },
 ];
 
 export const MODELS = MODEL_REGISTRY.map((m) => m.id) as
@@ -46,14 +45,14 @@ export function modelLabel(modelId: string): string {
 const API_VERSION        = "v1beta";
 const FETCH_TIMEOUT_MS   = 90_000;
 const RETRY_DELAYS_MS    = [1_500, 4_000] as const;
-const CIRCUIT_TRIP_COUNT = 3;      // consecutive failures before tripping
-const CIRCUIT_RESET_MS   = 60_000; // how long a tripped model is skipped (ms)
+const CIRCUIT_TRIP_COUNT = 3;
+const CIRCUIT_RESET_MS   = 60_000;
 
 // ── Circuit-breaker state ──────────────────────────────────────────────────
 
 interface CircuitState {
   failures:     number;
-  trippedUntil: number; // epoch ms; 0 = not tripped
+  trippedUntil: number;
 }
 
 const circuitMap = new Map<string, CircuitState>();
@@ -82,7 +81,6 @@ function isTripped(model: string): boolean {
   const c = getCircuit(model);
   if (c.trippedUntil === 0) return false;
   if (Date.now() > c.trippedUntil) {
-    // Auto-reset (half-open)
     c.failures = 0;
     c.trippedUntil = 0;
     console.info(`[gemini-router] circuit RESET (half-open) for ${model}`);
@@ -153,8 +151,9 @@ async function callGeminiModel(
 
 /**
  * Try one model with up to RETRY_DELAYS_MS.length retries.
- * Retries ONLY on 503 or transient network errors (status === undefined).
- * Any other HTTP error (400, 404, 429, 500…) is thrown immediately.
+ * Retries ONLY on 503 (service unavailable).
+ * 429, 404, and network errors are thrown immediately so callGemini
+ * can advance the cascade.
  */
 async function tryModel(
   contents: object[],
@@ -173,10 +172,11 @@ async function tryModel(
       return result;
     } catch (err) {
       const e = err as Error & { status?: number };
-      const isTransient = e.status === 503 || e.status === undefined;
-      if (isTransient && attempt < RETRY_DELAYS_MS.length) {
+      // Retry only on 503 (transient server error)
+      const isRetryable = e.status === 503;
+      if (isRetryable && attempt < RETRY_DELAYS_MS.length) {
         lastError = e;
-        recordFailure(model);
+        console.warn(`[gemini-router] ${model} 503 — retry ${attempt + 1}/${RETRY_DELAYS_MS.length}`);
         continue;
       }
       recordFailure(model);
@@ -191,14 +191,15 @@ async function tryModel(
 export interface GeminiResult {
   raw:   string;
   model: string;
-  /** Human-readable label for this model (e.g. 'Gemini 2.5 Flash') */
   label: string;
 }
 
 /**
- * Main cascade: walk MODELS[], advance only on 429 or tripped circuit.
- * Non-429 HTTP errors (400, 404, 500…) are thrown immediately without
- * advancing the cascade — they indicate a request-level problem, not quota.
+ * Main cascade: walk MODELS[], advance on:
+ *   - 429  quota exceeded
+ *   - 404  model not found (wrong name)
+ *   - undefined status  network / DNS error
+ * Non-advanceable errors (400, 500…) are thrown immediately.
  */
 export async function callGemini(
   contents: object[],
@@ -218,11 +219,13 @@ export async function callGemini(
       return { raw, model, label };
     } catch (err) {
       const e = err as Error & { status?: number };
-      if (e.status === 429) {
-        console.warn(`[gemini-router] ${model} quota exceeded (429) — advancing cascade`);
+      // Advance cascade on: quota (429), bad model name (404), network/DNS (undefined)
+      if (e.status === 429 || e.status === 404 || e.status === undefined) {
+        console.warn(`[gemini-router] ${model} unavailable (${e.status ?? "network"}) — advancing cascade`);
         recordFailure(model);
         continue;
       }
+      // Hard errors (400, 500…) — stop immediately, don't waste quota
       throw e;
     }
   }
