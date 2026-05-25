@@ -441,6 +441,13 @@ export default function Workbench() {
   //
   //   Path A (items[] present): applySelectiveConversion builds the patched
   //     document from surgical replacements → stored in preview.text.
+  //
+  //     FUZZY-ANCHOR FIX: each replacement now carries originalText extracted
+  //     client-side via text.slice(start, end). This activates Layers 1–3 of
+  //     applySelectiveConversion without sending the full document to the server.
+  //     The server only needs to return correct start/end offsets relative to
+  //     the evidence snippets; the client resolves real document positions.
+  //
   //   Path B (convertedText only): full rewritten document → preview.text.
   //
   async function handleAiConvert() {
@@ -483,7 +490,13 @@ export default function Workbench() {
 
     const modelNote = result._label ? ` — ${result._label}` : "";
 
-    // ── Path A: items[] present — surgical patch → preview ─────────────────
+    // ── Path A: items[] present — surgical patch via fuzzy-anchor → preview ──
+    //
+    // originalText is extracted here on the client using text.slice(start, end).
+    // This is the key fix: the fuzzy-anchor algorithm in applySelectiveConversion
+    // uses this field to locate the real document position even when AI-reported
+    // offsets drift due to Evidence-Pack snippet boundaries.
+    //
     const replacements = (result.items ?? []).map((aiItem) => {
       if (
         typeof aiItem.start !== "number" ||
@@ -492,11 +505,20 @@ export default function Workbench() {
         !aiItem.text.trim()
       ) return null;
 
+      // Extract the original span from the live document — no server roundtrip needed.
       const originalSpan = text.slice(aiItem.start, aiItem.end);
+
+      // Skip if replacement is identical to original (no change needed).
       if (aiItem.text === originalSpan) return null;
 
-      return { start: aiItem.start as number, end: aiItem.end as number, text: aiItem.text as string };
-    }).filter((x): x is { start: number; end: number; text: string } => x !== null);
+      return {
+        start:        aiItem.start as number,
+        end:          aiItem.end   as number,
+        text:         aiItem.text  as string,
+        // Fuzzy-anchor key: client-extracted original text activates Layers 1–3.
+        originalText: originalSpan,
+      };
+    }).filter((x): x is { start: number; end: number; text: string; originalText: string } => x !== null);
 
     if (replacements.length > 0) {
       const patched = applySelectiveConversion(text, replacements);
@@ -1215,16 +1237,13 @@ export default function Workbench() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label className="text-xs">Целевой стиль</Label>
-                    <Select
-                      value={convertTargetStyle}
-                      onValueChange={(v) => setConvertTargetStyle(v as CitationStyle)}
-                    >
+                    <Label className="text-xs font-medium">Целевой стиль</Label>
+                    <Select value={convertTargetStyle} onValueChange={(v) => setConvertTargetStyle(v as CitationStyle)}>
                       <SelectTrigger className="h-8 text-xs">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {(["APA", "Chicago", "MLA", "GOST", "IEEE", "Vancouver", "Harvard"] as CitationStyle[]).map((s) => (
+                        {(["APA", "Chicago", "MLA", "IEEE", "Vancouver", "Harvard", "GOST"] as CitationStyle[]).map((s) => (
                           <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>
                         ))}
                       </SelectContent>
@@ -1232,54 +1251,59 @@ export default function Workbench() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label className="text-xs">Область конвертации</Label>
+                    <Label className="text-xs font-medium">Область конвертации</Label>
                     <div className="space-y-1.5">
                       {CONVERT_SCOPE_OPTIONS.map((opt) => (
-                        <div key={opt.id} className="flex items-center gap-2">
+                        <label key={opt.id} className="flex items-start gap-2 cursor-pointer group">
                           <Checkbox
-                            id={`scope-${opt.id}`}
                             checked={convertScope.includes(opt.id)}
                             onCheckedChange={() => toggleScope(opt.id)}
-                            className="h-3.5 w-3.5"
+                            className="mt-0.5"
                           />
-                          <label htmlFor={`scope-${opt.id}`} className="text-xs cursor-pointer flex-1">
-                            <span className="font-medium">{opt.label}</span>
-                            <span className="text-muted-foreground ml-1">— {opt.description}</span>
-                          </label>
-                        </div>
+                          <div className="min-w-0">
+                            <span className="text-xs font-medium group-hover:text-foreground transition-colors">{opt.label}</span>
+                            <p className="text-[10px] text-muted-foreground">{opt.description}</p>
+                          </div>
+                        </label>
                       ))}
                     </div>
                   </div>
 
                   <Button
-                    className="w-full h-9 text-sm"
+                    className="w-full h-9 text-xs"
                     onClick={handleAiConvert}
                     disabled={aiConvertLoading || convertScope.length === 0 || !text.trim()}
                   >
-                    {aiConvertLoading ? (
-                      <><RefreshCw className="h-4 w-4 mr-2 animate-spin" />Конвертация…</>
-                    ) : (
-                      <><Sparkles className="h-4 w-4 mr-2" />Конвертировать через Gemini</>
-                    )}
+                    <Sparkles className="h-4 w-4 mr-1.5" />
+                    {aiConvertLoading ? "Конвертация…" : `Конвертировать → ${convertTargetStyle}`}
                   </Button>
 
-                  {aiConvertData && !aiConvertLoading && (
-                    <div className="rounded-md border p-3 space-y-1.5 text-xs">
-                      <p className="font-medium">Результат конвертации</p>
-                      {aiConvertData.summary && (
-                        <p className="text-muted-foreground">{aiConvertData.summary}</p>
-                      )}
-                      {aiConvertData.bibEntries?.length > 0 && (
-                        <p className="text-muted-foreground">
-                          Библиография: {aiConvertData.bibEntries.length} записей
-                          {aiConvertData.bibEntries.filter((e) => e.converted).length > 0 &&
-                            ` (${aiConvertData.bibEntries.filter((e) => e.converted).length} сконвертировано)`
-                          }
-                        </p>
-                      )}
-                      {aiConvertData._label && (
-                        <p className="text-[10px] text-muted-foreground/70">Модель: {aiConvertData._label}</p>
-                      )}
+                  {preview && (
+                    <div className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/20 p-3 space-y-2">
+                      <div className="flex items-center gap-1.5 text-xs font-medium text-amber-800 dark:text-amber-300">
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Предпросмотр готов
+                      </div>
+                      <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                        Нажмите «Применить» в верхней полосе чтобы сохранить изменения в документ.
+                      </p>
+                      <div className="flex gap-1.5">
+                        <Button size="sm" variant="outline" className="h-7 text-xs flex-1 border-amber-400" onClick={() => { setPreview(null); setAiTargetStyle(null); }}>
+                          Отмена
+                        </Button>
+                        <Button size="sm" className="h-7 text-xs flex-1 bg-amber-600 hover:bg-amber-700 text-white" onClick={applyConversion}>
+                          <CheckCircle2 className="h-3.5 w-3.5 mr-1" />Применить
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {aiConvertError && (
+                    <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="h-3.5 w-3.5 text-destructive mt-0.5 shrink-0" />
+                        <p className="text-[11px] text-destructive">{aiConvertError}</p>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1290,13 +1314,15 @@ export default function Workbench() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <h2 className="text-sm font-semibold">Редактура</h2>
-                    <Badge variant={issues.length > 0 ? "destructive" : "secondary"} className="text-[10px]">
+                    <Badge variant={issues.length > 0 ? "destructive" : "outline"} className="text-[10px]">
                       {issues.length} замеч.
                     </Badge>
                   </div>
 
                   {issues.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">Замечаний не обнаружено.</p>
+                    <p className="text-xs text-muted-foreground pt-1">
+                      Замечаний не найдено. Текст соответствует академическим стандартам.
+                    </p>
                   ) : (
                     <div className="space-y-1.5">
                       {issues.map((iss) => {
@@ -1318,7 +1344,7 @@ export default function Workbench() {
                             </div>
                             <div className="text-muted-foreground truncate">{iss.text}</div>
                             {iss.suggestion && (
-                              <div className="text-[10px] text-primary/80 mt-0.5 truncate">→ {iss.suggestion}</div>
+                              <div className="text-[10px] text-primary mt-0.5 truncate">→ {iss.suggestion}</div>
                             )}
                           </button>
                         );
@@ -1334,24 +1360,34 @@ export default function Workbench() {
                   <h2 className="text-sm font-semibold">Статистика</h2>
                   <div className="grid grid-cols-2 gap-2">
                     {[
-                      { label: "Слов",          value: stats.words },
-                      { label: "Знаков (с пр.)", value: stats.charsWithSpaces },
-                      { label: "Знаков (без)",   value: stats.charsNoSpaces },
+                      { label: "Слов",           value: stats.words.toLocaleString("ru") },
+                      { label: "Знаков (с пр.)", value: stats.charsWithSpaces.toLocaleString("ru") },
+                      { label: "Знаков (без пр.)", value: stats.charsNoSpaces.toLocaleString("ru") },
                       { label: "Абзацев",        value: stats.paragraphs },
                       { label: "Строк",          value: stats.lines },
-                      { label: "Мин. чтения",    value: stats.readingMinutes },
+                      { label: "Время чтения",   value: `~${stats.readingMinutes} мин` },
                     ].map(({ label, value }) => (
-                      <div key={label} className="rounded-md border p-2.5 text-center">
-                        <div className="text-lg font-bold tabular-nums">{value.toLocaleString("ru")}</div>
-                        <div className="text-[10px] text-muted-foreground mt-0.5">{label}</div>
+                      <div key={label} className="rounded-md border p-2.5 space-y-0.5">
+                        <p className="text-[10px] text-muted-foreground">{label}</p>
+                        <p className="text-sm font-semibold tabular-nums">{value}</p>
                       </div>
                     ))}
                   </div>
                   <Separator />
-                  <div className="space-y-1 text-xs text-muted-foreground">
-                    <p>Цитат найдено: <span className="text-foreground font-medium">{found.length}</span></p>
-                    <p>Замечаний редактора: <span className="text-foreground font-medium">{issues.length}</span></p>
-                    <p>Разделов: <span className="text-foreground font-medium">{displaySections.length}</span></p>
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Цитирование</p>
+                    {[
+                      { label: "Всего элементов", value: found.length },
+                      { label: "APA-вставок",     value: found.filter((f) => f.type === "inline-apa").length },
+                      { label: "Числовых сносок", value: found.filter((f) => f.type === "inline-numeric").length },
+                      { label: "Библиография",    value: found.filter((f) => f.type === "bibliography").length },
+                      { label: "Прямых цитат",    value: found.filter((f) => f.type === "quote").length },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="flex justify-between text-xs">
+                        <span className="text-muted-foreground">{label}</span>
+                        <span className="font-medium tabular-nums">{value}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
