@@ -436,13 +436,12 @@ export default function Workbench() {
   //
   // Unified preview-first strategy:
   //   Both paths (items[] and convertedText fallback) ALWAYS go through
-  //   setPreview. No setText() is called here — the user must confirm by
-  //   pressing «Применить» in the yellow preview bar.
+  //   setPreview. No setText() is called directly — the user must confirm
+  //   by pressing «Применить» in the yellow preview bar.
   //
-  //   Path A (items[]): applySelectiveConversion builds the patched document
-  //     from surgical replacements → stored in preview.text.
-  //   Path B (convertedText only): the full rewritten document goes directly
-  //     into preview.text.
+  //   Path A (items[] present): applySelectiveConversion builds the patched
+  //     document from surgical replacements → stored in preview.text.
+  //   Path B (convertedText only): full rewritten document → preview.text.
   //
   async function handleAiConvert() {
     if (!text.trim() || convertScope.length === 0) return;
@@ -486,7 +485,6 @@ export default function Workbench() {
 
     // ── Path A: items[] present — surgical patch → preview ─────────────────
     const replacements = (result.items ?? []).map((aiItem) => {
-      // Accept item if it has start/end coords and a non-empty converted text
       if (
         typeof aiItem.start !== "number" ||
         typeof aiItem.end   !== "number" ||
@@ -494,7 +492,6 @@ export default function Workbench() {
         !aiItem.text.trim()
       ) return null;
 
-      // Only include if the converted text differs from the original span
       const originalSpan = text.slice(aiItem.start, aiItem.end);
       if (aiItem.text === originalSpan) return null;
 
@@ -502,7 +499,6 @@ export default function Workbench() {
     }).filter((x): x is { start: number; end: number; text: string } => x !== null);
 
     if (replacements.length > 0) {
-      // Build patched document but DO NOT commit — show preview instead
       const patched = applySelectiveConversion(text, replacements);
       setAiTargetStyle(convertTargetStyle);
       setPreview({ target: convertTargetStyle, text: patched });
@@ -781,30 +777,6 @@ export default function Workbench() {
         </div>
       )}
 
-      {/* ── Preview bar ─────────────────────────────────────────────────────── */}
-      {preview && (
-        <div className="h-9 border-b flex items-center gap-3 px-4 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 shrink-0">
-          <AlertTriangle className="h-4 w-4 shrink-0" />
-          <span className="text-[13px] font-medium flex-1 min-w-0 truncate">
-            Предпросмотр конвертации → <strong>{preview.target}</strong>. Изменения ещё не применены.
-          </span>
-          <Button
-            size="sm"
-            className="h-7 bg-amber-600 hover:bg-amber-700 text-white shrink-0"
-            onClick={applyConversion}
-          >
-            <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />Применить
-          </Button>
-          <Button
-            size="sm" variant="ghost"
-            className="h-7 text-amber-700 hover:text-amber-900 shrink-0"
-            onClick={() => { setPreview(null); setAiTargetStyle(null); }}
-          >
-            <RotateCcw className="h-3.5 w-3.5 mr-1.5" />Отмена
-          </Button>
-        </div>
-      )}
-
       {/* ── Import-by-link dialog ──────────────────────────────────────────── */}
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
         <DialogContent className="sm:max-w-xl">
@@ -912,47 +884,481 @@ export default function Workbench() {
           />
         </aside>
 
-        {/* ── Document area — rest of the layout unchanged ───────────────────── */}
-        {/* NOTE: the document pane, right inspector, and all panels below this  */}
-        {/* comment are identical to the previous version and are preserved as-is */}
+        {/* ── Document area ─────────────────────────────────────────────────── */}
         <main className="flex-1 flex flex-col min-w-0 relative">
-          <div className="flex-1 min-h-0 flex">
-            <ScrollArea className="flex-1">
+
+          {editMode && (
+            <div className="h-9 border-b flex items-center gap-1 px-3 bg-muted/20 shrink-0">
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("bold")}><Bold className="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("italic")}><Italic className="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("underline")}><UnderlineIcon className="h-3.5 w-3.5" /></Button>
+              <Separator orientation="vertical" className="h-4 mx-1" />
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => document.execCommand("insertUnorderedList")}><List className="h-3.5 w-3.5" /></Button>
+              <div className="ml-auto flex items-center gap-1">
+                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => { setDraft(text); setEditMode(false); }}>
+                  <RotateCcw className="h-3 w-3 mr-1" />Отмена
+                </Button>
+                <Button size="sm" className="h-7 text-xs" onClick={() => { setText(draft); setEditMode(false); toast({ title: "Изменения сохранены" }); }}>
+                  <Save className="h-3.5 w-3.5 mr-1" />Сохранить
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {preview && (
+            <div className="h-9 border-b flex items-center gap-3 px-4 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 text-sm shrink-0">
+              <RefreshCw className="h-4 w-4" />
+              <span>Предпросмотр конвертации в <strong>{preview.target}</strong></span>
+              <div className="ml-auto flex gap-2">
+                <Button size="sm" variant="outline" className="h-7 text-xs border-amber-400" onClick={() => { setPreview(null); setAiTargetStyle(null); }}>Отмена</Button>
+                <Button size="sm" className="h-7 text-xs bg-amber-600 hover:bg-amber-700 text-white" onClick={applyConversion}>
+                  <CheckCircle2 className="h-3.5 w-3.5 mr-1" />Применить
+                </Button>
+              </div>
+            </div>
+          )}
+
+          <ScrollArea className="flex-1">
+            {!editMode && (
               <div
-                className="p-8 max-w-3xl mx-auto"
+                className={`p-6 min-h-full font-mono text-sm leading-relaxed whitespace-pre-wrap select-text ${
+                  preview ? "opacity-90" : ""
+                }`}
                 data-testid="document-area"
               >
-                {annotationSegments.map((seg, i) =>
-                  seg.kind === "plain" ? (
-                    <span key={i}>{seg.text}</span>
-                  ) : (
+                {annotationSegments.map((seg, idx) => {
+                  if (seg.kind === "plain") {
+                    return <span key={idx}>{seg.text}</span>;
+                  }
+                  const itemId = seg.itemId!;
+                  const isHovered  = hoveredId === itemId;
+                  const isSelected = selected !== null && selected.start === seg.start && selected.end === seg.end;
+                  const classes = [
+                    seg.annClass!,
+                    isHovered  ? "ann-focused"  : "",
+                    isSelected ? "ann-selected" : "",
+                  ].filter(Boolean).join(" ");
+
+                  return (
                     <span
-                      key={i}
+                      key={idx}
                       ref={(el) => {
-                        if (el && seg.itemId) spanRefs.current.set(seg.itemId, el);
+                        if (el) spanRefs.current.set(itemId, el);
+                        else spanRefs.current.delete(itemId);
                       }}
+                      className={classes}
+                      data-item-id={itemId}
+                      data-start={seg.start}
+                      data-end={seg.end}
                       tabIndex={0}
                       role="mark"
-                      aria-label={seg.itemType}
-                      className={[
-                        seg.annClass,
-                        selected && selected.start === seg.start && selected.end === seg.end
-                          ? "ann-selected"
-                          : "",
-                        hoveredId === seg.itemId ? "ann-focused" : "",
-                      ].filter(Boolean).join(" ")}
-                      onClick={() => handleSpanClick(seg)}
-                      onMouseEnter={() => seg.itemId && setHoveredId(seg.itemId)}
+                      aria-label={`${seg.annKind === "issue" ? "Замечание" : "Аннотация"}: ${seg.text}`}
+                      onMouseEnter={() => setHoveredId(itemId)}
                       onMouseLeave={() => setHoveredId(null)}
+                      onClick={() => handleSpanClick(seg)}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleSpanClick(seg); } }}
                     >
                       {seg.text}
                     </span>
-                  )
-                )}
+                  );
+                })}
               </div>
-            </ScrollArea>
-          </div>
+            )}
+
+            {editMode && (
+              <div
+                className="p-6 min-h-full font-mono text-sm leading-relaxed outline-none whitespace-pre-wrap cursor-text"
+                contentEditable
+                suppressContentEditableWarning
+                onInput={(e) => setDraft((e.target as HTMLDivElement).innerText)}
+                data-testid="document-area-edit"
+              >
+                {text}
+              </div>
+            )}
+          </ScrollArea>
+
+          {!editMode && (
+            <button
+              type="button"
+              className="absolute bottom-4 right-4 h-9 w-9 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center hover:bg-primary/90 transition-colors"
+              onClick={() => setEditMode(true)}
+              title="Редактировать документ"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+          )}
         </main>
+
+        {/* ── Right panel ───────────────────────────────────────────────────── */}
+        <div
+          className="flex flex-col border-l bg-background shrink-0 relative"
+          style={{ width: rightPanel.width }}
+          data-testid="right-panel"
+        >
+          <div
+            className="absolute top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/30 transition-colors z-10"
+            style={{ left: 0 }}
+            onMouseDown={rightPanel.onMouseDown}
+          />
+
+          <ScrollArea className="flex-1">
+            <div className="p-4">
+
+              {/* ── Structure panel ─────────────────────────────────────── */}
+              {panel === "structure" && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">Структура документа</h2>
+                    <Badge variant="outline" className="text-[10px]">{displaySections.length} разд.</Badge>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <Badge variant="secondary" className="text-[10px] gap-1">
+                      <Type className="h-3 w-3" />{structure.language === "ru" ? "RU" : structure.language === "en" ? "EN" : "RU+EN"}
+                    </Badge>
+                    <Badge variant="secondary" className="text-[10px] gap-1">
+                      <AlignLeft className="h-3 w-3" />{structure.paragraphs} абз.
+                    </Badge>
+                    {aiSections && aiSections.length > 0 && (
+                      <Badge variant="secondary" className="text-[10px] gap-1 text-primary border-primary/30">
+                        <Sparkles className="h-3 w-3" />AI
+                      </Badge>
+                    )}
+                  </div>
+
+                  {displaySections.length === 0 ? (
+                    <div className="space-y-2 pt-1">
+                      <p className="text-xs text-muted-foreground">
+                        Явные заголовки не обнаружены — документ может быть сплошным текстом.
+                      </p>
+                      {!aiData && (
+                        <p className="text-[11px] text-muted-foreground">
+                          Запустите <span className="font-medium text-foreground">AI-анализ</span> для уточнённого распознавания разделов.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-0.5">
+                      {displaySections.map((sec, i) => (
+                        <div
+                          key={i}
+                          className="flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 cursor-default transition-colors group"
+                          style={{ paddingLeft: `${(sec.level - 1) * 12 + 8}px` }}
+                          title={`Строка ${sec.startLine}${sec.source === "ai" ? " · AI" : ""}`}
+                        >
+                          <span
+                            className="text-[10px] text-muted-foreground mt-0.5 shrink-0 w-3 text-right select-none"
+                            aria-label={`Уровень ${sec.level}`}
+                          >
+                            {sec.level}
+                          </span>
+                          <span className="text-xs leading-snug break-words min-w-0 flex-1 text-foreground">
+                            {sec.heading}
+                          </span>
+                          <div className="flex items-center gap-1 shrink-0 ml-1">
+                            {sec.source === "ai" && (
+                              <Badge
+                                variant="outline"
+                                className="text-[9px] px-1 py-0 h-3.5 text-primary border-primary/30"
+                                title="Обнаружен AI-анализом"
+                              >
+                                AI
+                              </Badge>
+                            )}
+                            <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">
+                              стр. {sec.startLine}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Citations panel ─────────────────────────────────────── */}
+              {panel === "citations" && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">Цитаты и сноски</h2>
+                    <Badge variant="outline" className="text-[10px]">{found.length} эл.</Badge>
+                  </div>
+
+                  <div className="flex gap-1.5">
+                    <Input
+                      placeholder="Поиск…"
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      className="h-7 text-xs flex-1"
+                    />
+                    <Select value={typeFilter} onValueChange={setTypeFilter}>
+                      <SelectTrigger className="h-7 w-[110px] text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all" className="text-xs">Все типы</SelectItem>
+                        {Object.entries(TYPE_LABELS).map(([k, v]) => (
+                          <SelectItem key={k} value={k} className="text-xs">{v}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {filteredFound.length === 0 ? (
+                    <p className="text-xs text-muted-foreground pt-1">
+                      {found.length === 0
+                        ? "Цитат не обнаружено. Попробуйте загрузить другой документ."
+                        : "Нет совпадений с фильтром."}
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {filteredFound.map((item) => {
+                        const isSelected = selected?.start === item.start && selected?.end === item.end;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={`w-full text-left rounded-md px-3 py-2 text-xs transition-colors border ${
+                              isSelected
+                                ? "bg-primary/10 border-primary/30"
+                                : "hover:bg-muted border-transparent hover:border-border"
+                            }`}
+                            onClick={() => handlePanelItemClick(item.id, item.start, item.end)}
+                          >
+                            <div className="flex items-center gap-1.5 mb-0.5">
+                              <span className={`legend-dot ${legendDotClass(item.type)}`} />
+                              <span className="font-medium">{TYPE_LABELS[item.type]}</span>
+                              {item.source && item.source !== "heuristic" && (
+                                <Badge variant="outline" className="text-[9px] px-1 py-0 h-3.5">
+                                  {item.source === "ai" ? "AI" : "✓"}
+                                </Badge>
+                              )}
+                              {item.confidence !== undefined && (
+                                <span className="ml-auto text-[10px] text-muted-foreground">
+                                  {Math.round(item.confidence * 100)}%
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-muted-foreground truncate">{item.text}</div>
+                            {item.note && (
+                              <div className="text-[10px] text-muted-foreground/70 mt-0.5 truncate">{item.note}</div>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Style panel ─────────────────────────────────────────── */}
+              {panel === "style" && (
+                <div className="space-y-4">
+                  <h2 className="text-sm font-semibold">Стиль цитирования</h2>
+
+                  <div className="rounded-lg border p-3 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium">Обнаруженный стиль</span>
+                      <Badge>{detected.style}</Badge>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="h-1.5 flex-1 bg-muted rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-primary rounded-full transition-all"
+                          style={{ width: `${Math.round(detected.confidence * 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-[10px] text-muted-foreground w-8 text-right">
+                        {Math.round(detected.confidence * 100)}%
+                      </span>
+                    </div>
+                    {aiData && (
+                      <p className="text-[10px] text-muted-foreground">
+                        AI: {aiData.detectedStyle} ({Math.round((aiData.confidence ?? 0) * 100)}%)
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-xs font-medium">Быстрая конвертация (эвристика)</Label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(["APA", "Chicago", "MLA", "GOST"] as CitationStyle[]).map((style) => (
+                        <Button
+                          key={style}
+                          variant={detected.style === style ? "default" : "outline"}
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={() => {
+                            const converted = convertCitations(text, found, style, customRules);
+                            setPreview({ target: style, text: converted });
+                          }}
+                        >
+                          {style}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Convert panel ───────────────────────────────────────── */}
+              {panel === "convert" && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">AI-конвертация</h2>
+                    {aiConvertModel && (
+                      <Badge variant="outline" className="text-[10px] gap-1">
+                        <Cpu className="h-2.5 w-2.5" />{aiConvertModel}
+                      </Badge>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-xs">Целевой стиль</Label>
+                    <Select
+                      value={convertTargetStyle}
+                      onValueChange={(v) => setConvertTargetStyle(v as CitationStyle)}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(["APA", "Chicago", "MLA", "GOST", "IEEE", "Vancouver", "Harvard"] as CitationStyle[]).map((s) => (
+                          <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-xs">Область конвертации</Label>
+                    <div className="space-y-1.5">
+                      {CONVERT_SCOPE_OPTIONS.map((opt) => (
+                        <div key={opt.id} className="flex items-center gap-2">
+                          <Checkbox
+                            id={`scope-${opt.id}`}
+                            checked={convertScope.includes(opt.id)}
+                            onCheckedChange={() => toggleScope(opt.id)}
+                            className="h-3.5 w-3.5"
+                          />
+                          <label htmlFor={`scope-${opt.id}`} className="text-xs cursor-pointer flex-1">
+                            <span className="font-medium">{opt.label}</span>
+                            <span className="text-muted-foreground ml-1">— {opt.description}</span>
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <Button
+                    className="w-full h-9 text-sm"
+                    onClick={handleAiConvert}
+                    disabled={aiConvertLoading || convertScope.length === 0 || !text.trim()}
+                  >
+                    {aiConvertLoading ? (
+                      <><RefreshCw className="h-4 w-4 mr-2 animate-spin" />Конвертация…</>
+                    ) : (
+                      <><Sparkles className="h-4 w-4 mr-2" />Конвертировать через Gemini</>
+                    )}
+                  </Button>
+
+                  {aiConvertData && !aiConvertLoading && (
+                    <div className="rounded-md border p-3 space-y-1.5 text-xs">
+                      <p className="font-medium">Результат конвертации</p>
+                      {aiConvertData.summary && (
+                        <p className="text-muted-foreground">{aiConvertData.summary}</p>
+                      )}
+                      {aiConvertData.bibEntries?.length > 0 && (
+                        <p className="text-muted-foreground">
+                          Библиография: {aiConvertData.bibEntries.length} записей
+                          {aiConvertData.bibEntries.filter((e) => e.converted).length > 0 &&
+                            ` (${aiConvertData.bibEntries.filter((e) => e.converted).length} сконвертировано)`
+                          }
+                        </p>
+                      )}
+                      {aiConvertData._label && (
+                        <p className="text-[10px] text-muted-foreground/70">Модель: {aiConvertData._label}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Editor panel ────────────────────────────────────────── */}
+              {panel === "editor" && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">Редактура</h2>
+                    <Badge variant={issues.length > 0 ? "destructive" : "secondary"} className="text-[10px]">
+                      {issues.length} замеч.
+                    </Badge>
+                  </div>
+
+                  {issues.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">Замечаний не обнаружено.</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {issues.map((iss) => {
+                        const isSelected = selected?.start === iss.start && selected?.end === iss.end;
+                        return (
+                          <button
+                            key={iss.id}
+                            type="button"
+                            className={`w-full text-left rounded-md px-3 py-2 text-xs transition-colors border ${
+                              isSelected
+                                ? "bg-destructive/10 border-destructive/30"
+                                : "hover:bg-muted border-transparent hover:border-border"
+                            }`}
+                            onClick={() => handlePanelItemClick("issue-" + iss.id, iss.start, iss.end)}
+                          >
+                            <div className="flex items-center gap-1.5 mb-0.5">
+                              <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />
+                              <span className="font-medium">{ISSUE_LABELS[iss.type]}</span>
+                            </div>
+                            <div className="text-muted-foreground truncate">{iss.text}</div>
+                            {iss.suggestion && (
+                              <div className="text-[10px] text-primary/80 mt-0.5 truncate">→ {iss.suggestion}</div>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Stats panel ─────────────────────────────────────────── */}
+              {panel === "stats" && (
+                <div className="space-y-3">
+                  <h2 className="text-sm font-semibold">Статистика</h2>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { label: "Слов",          value: stats.words },
+                      { label: "Знаков (с пр.)", value: stats.charsWithSpaces },
+                      { label: "Знаков (без)",   value: stats.charsNoSpaces },
+                      { label: "Абзацев",        value: stats.paragraphs },
+                      { label: "Строк",          value: stats.lines },
+                      { label: "Мин. чтения",    value: stats.readingMinutes },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="rounded-md border p-2.5 text-center">
+                        <div className="text-lg font-bold tabular-nums">{value.toLocaleString("ru")}</div>
+                        <div className="text-[10px] text-muted-foreground mt-0.5">{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <Separator />
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p>Цитат найдено: <span className="text-foreground font-medium">{found.length}</span></p>
+                    <p>Замечаний редактора: <span className="text-foreground font-medium">{issues.length}</span></p>
+                    <p>Разделов: <span className="text-foreground font-medium">{displaySections.length}</span></p>
+                  </div>
+                </div>
+              )}
+
+            </div>
+          </ScrollArea>
+        </div>
       </div>
     </div>
   );
