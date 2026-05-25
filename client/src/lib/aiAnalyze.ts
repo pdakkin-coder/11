@@ -13,6 +13,7 @@
  *  - CLIENT_RETRY:  automatic retry on transient 429/503 errors (2 attempts)
  *  - activeModel:   exposes which Gemini model responded (for UI badge)
  *  - mergeFoundItems: near-overlap merge (heuristic ±5 chars vs. AI exact)
+ *  - applySelectiveConversion: fuzzy-anchor algorithm (4-layer offset resolution)
  */
 
 import { useState, useCallback, useRef } from "react";
@@ -32,6 +33,11 @@ const CLIENT_MAX_RETRIES = 2;
 const CLIENT_RETRY_BASE_MS = 3_000;
 /** Near-overlap tolerance in characters for mergeFoundItems */
 const NEAR_OVERLAP_TOL = 5;
+/**
+ * Search window (chars) around the AI-reported offset for fuzzy-anchor Layer 2.
+ * Large enough to absorb Evidence-Pack snippet drift, small enough to be fast.
+ */
+const ANCHOR_WINDOW = 120;
 
 // ── Request / Response types ────────────────────────────────────────────────────────
 
@@ -200,7 +206,6 @@ async function fetchWithRetry(
 
         if (isTransient(lastError, res.status) && attempt < CLIENT_MAX_RETRIES) continue;
 
-        // Non-transient or exhausted retries — return error response
         const msg = humaniseError(lastError, attempt);
         return {
           data: {
@@ -218,11 +223,9 @@ async function fetchWithRetry(
       if ((err as Error).name === "AbortError") throw err;
       lastError = err instanceof Error ? err.message : String(err);
       if (!isTransient(lastError) || attempt >= CLIENT_MAX_RETRIES) throw err;
-      // transient network error — retry
     }
   }
 
-  // Exhausted all retries
   const msg = humaniseError(lastError, CLIENT_MAX_RETRIES);
   return {
     data: {
@@ -259,7 +262,6 @@ export function useAiAnalyze() {
         req,
         ctrl.signal,
         (attempt, delay) => {
-          // Surface retry status to the state so UI can show a spinner message
           setState((prev) => ({
             ...prev,
             error: `Повторная попытка ${attempt}/${CLIENT_MAX_RETRIES} через ${delay / 1000} с…`,
@@ -305,11 +307,6 @@ export function useAiAnalyze() {
 
 // ── useAiConvert ───────────────────────────────────────────────────────────────────────
 
-/**
- * Dedicated hook for citation conversion (POST /api/ai-convert).
- * Mirrors useAiAnalyze but always sets scope=["convert"] and requires
- * a targetStyle. Uses the same retry logic.
- */
 export function useAiConvert() {
   const [state, setState] = useState<AiAnalyzeState>({
     data: null, loading: false, error: null, activeModel: null, retryCount: 0,
@@ -384,21 +381,48 @@ export function useAiConvert() {
 // ── applySelectiveConversion ───────────────────────────────────────────────────────────
 
 export interface SelectiveConversionItem {
+  /** Replacement text (converted citation) */
+  text: string;
+  /**
+   * Original text of the citation span as it appears in the document.
+   * Used by the fuzzy-anchor resolver to locate the real position.
+   * When absent, only offset-based layers (1 & 2) are attempted.
+   */
+  originalText?: string;
+  /**
+   * Hint offsets from AI. May be relative to an evidence snippet, not the
+   * full document — the fuzzy-anchor algorithm corrects for this drift.
+   */
   start: number;
   end: number;
-  text: string;
 }
 
 /**
- * Apply targeted replacements to the original document while preserving all
- * untouched text verbatim.
+ * Fuzzy-Anchor Selective Replacement Algorithm
+ * ─────────────────────────────────────────────
+ * Resolves where each replacement should be applied using a 4-layer cascade:
  *
- * Strategy:
- *  - Replacements are sorted end→start so that earlier char offsets are not
- *    invalidated by mutations further in the string.
- *  - Each replacement is validated (finite numbers, non-zero range, within text
- *    bounds, non-empty string) before being applied.
- *  - Overlapping replacements are skipped (nextEnd guard).
+ *  Layer 1 — Exact offset match
+ *    Check originalText === doc.slice(start, end). If yes, apply directly.
+ *    This handles well-formed AI responses with correct offsets.
+ *
+ *  Layer 2 — Windowed fuzzy search (±ANCHOR_WINDOW chars)
+ *    Search for originalText within [start - ANCHOR_WINDOW, end + ANCHOR_WINDOW].
+ *    Corrects drift introduced by Evidence-Pack snippet offsets.
+ *
+ *  Layer 3 — Global indexOf fallback
+ *    Search the entire document for originalText.
+ *    Used when the AI offset is completely wrong but the source text is unique.
+ *    Skipped if originalText appears more than once (ambiguous).
+ *
+ *  Layer 4 — Skip
+ *    If no layer resolves a valid anchor, the replacement is silently skipped.
+ *    This prevents corrupted insertions (the original text remains intact).
+ *
+ * Post-resolution:
+ *  - Resolved positions are sorted end→start to avoid offset shift.
+ *  - Duplicate anchors (same docStart) are deduplicated — first wins.
+ *  - Overlapping resolved ranges are skipped.
  */
 export function applySelectiveConversion(
   originalText: string,
@@ -406,25 +430,116 @@ export function applySelectiveConversion(
 ): string {
   if (!originalText || replacements.length === 0) return originalText;
 
-  const valid = replacements
-    .filter(
-      (item) =>
-        Number.isFinite(item.start) &&
-        Number.isFinite(item.end) &&
-        item.start >= 0 &&
-        item.end > item.start &&
-        item.end <= originalText.length &&
-        typeof item.text === "string",
-    )
-    .sort((a, b) => b.start - a.start); // end → start order
+  // ── Validate structural integrity of each item ──────────────────────────
+  const structurallyValid = replacements.filter(
+    (item) =>
+      Number.isFinite(item.start) &&
+      Number.isFinite(item.end) &&
+      item.start >= 0 &&
+      item.end > item.start &&
+      typeof item.text === "string" &&
+      item.text.trim().length > 0,
+  );
+
+  // ── Resolve each item to a real document position ──────────────────────
+  interface ResolvedItem {
+    docStart: number;
+    docEnd:   number;
+    newText:  string;
+  }
+
+  const resolved: ResolvedItem[] = [];
+  const seenStarts = new Set<number>();
+
+  for (const item of structurallyValid) {
+    const orig = item.originalText ?? "";
+    const hintStart = item.start;
+    const hintEnd   = item.end;
+    const hintLen   = hintEnd - hintStart;
+
+    // ── Layer 1: exact offset check ────────────────────────────────────
+    if (
+      orig.length > 0 &&
+      hintEnd <= originalText.length &&
+      originalText.slice(hintStart, hintEnd) === orig
+    ) {
+      if (!seenStarts.has(hintStart)) {
+        seenStarts.add(hintStart);
+        resolved.push({ docStart: hintStart, docEnd: hintEnd, newText: item.text });
+      }
+      continue;
+    }
+
+    // ── Layer 2: windowed search around hint offset ────────────────────
+    if (orig.length > 0) {
+      const searchStart = Math.max(0, hintStart - ANCHOR_WINDOW);
+      const searchEnd   = Math.min(originalText.length, hintEnd + ANCHOR_WINDOW);
+      const window      = originalText.slice(searchStart, searchEnd);
+      const localIdx    = window.indexOf(orig);
+
+      if (localIdx !== -1) {
+        const docStart = searchStart + localIdx;
+        const docEnd   = docStart + orig.length;
+        if (!seenStarts.has(docStart)) {
+          seenStarts.add(docStart);
+          resolved.push({ docStart, docEnd, newText: item.text });
+        }
+        continue;
+      }
+    }
+
+    // ── Layer 3: global indexOf (only if text is unambiguous) ──────────
+    if (orig.length > 0) {
+      const first  = originalText.indexOf(orig);
+      const second = first !== -1 ? originalText.indexOf(orig, first + 1) : -1;
+
+      if (first !== -1 && second === -1) {
+        // Unique occurrence — safe to apply globally
+        const docEnd = first + orig.length;
+        if (!seenStarts.has(first)) {
+          seenStarts.add(first);
+          resolved.push({ docStart: first, docEnd, newText: item.text });
+        }
+        continue;
+      }
+    }
+
+    // ── Layer 4: no anchor found ───────────────────────────────────────
+    // When originalText is absent, try a pure offset-based fallback
+    // only if the hint range is within document bounds and non-zero.
+    if (
+      orig.length === 0 &&
+      hintEnd <= originalText.length &&
+      hintLen > 0
+    ) {
+      if (!seenStarts.has(hintStart)) {
+        seenStarts.add(hintStart);
+        resolved.push({ docStart: hintStart, docEnd: hintEnd, newText: item.text });
+      }
+      continue;
+    }
+
+    // Truly unresolvable — skip silently to preserve document integrity
+    if (process.env.NODE_ENV !== "production") {
+      console.warn(
+        "[applySelectiveConversion] No anchor found for replacement:",
+        { originalText: orig.slice(0, 60), hintStart, hintEnd, newText: item.text.slice(0, 60) },
+      );
+    }
+  }
+
+  if (resolved.length === 0) return originalText;
+
+  // ── Sort end→start, skip overlapping ranges ────────────────────────────
+  resolved.sort((a, b) => b.docStart - a.docStart);
 
   let nextEnd = originalText.length;
   let out = originalText;
 
-  for (const item of valid) {
-    if (item.end > nextEnd) continue; // skip overlapping
-    out = out.slice(0, item.start) + item.text + out.slice(item.end);
-    nextEnd = item.start;
+  for (const r of resolved) {
+    if (r.docEnd > nextEnd) continue; // overlapping — skip
+    out = out.slice(0, r.docStart) + r.newText + out.slice(r.docEnd);
+    nextEnd = r.docStart;
   }
 
   return out;
@@ -449,7 +564,6 @@ export function mergeFoundItems(
   heuristic: FoundItem[],
   ai: FoundItem[],
 ): FoundItem[] {
-  // Build mutable map keyed by "start:end"
   const merged = new Map<string, FoundItem>();
 
   for (const h of heuristic) {
@@ -461,7 +575,6 @@ export function mergeFoundItems(
   for (const a of ai) {
     const exactKey = `${a.start}:${a.end}`;
 
-    // 1. Exact match
     if (merged.has(exactKey)) {
       const existing = merged.get(exactKey)!;
       merged.set(exactKey, {
@@ -473,7 +586,6 @@ export function mergeFoundItems(
       continue;
     }
 
-    // 2. Near-overlap: find closest heuristic item within tolerance
     const near = heuristicArr.find(
       (h) =>
         Math.abs(h.start - a.start) <= NEAR_OVERLAP_TOL &&
@@ -492,7 +604,6 @@ export function mergeFoundItems(
       continue;
     }
 
-    // 3. AI-only — append
     merged.set(exactKey, { ...a, source: "ai" as EvidenceSource });
   }
 
