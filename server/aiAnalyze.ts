@@ -92,7 +92,7 @@ function buildEvidencePackMsg(body: Record<string, unknown>): string {
   if (evidence.length) {
     parts.push(
       `EVIDENCE SNIPPETS (${evidence.length}):\n` +
-      JSON.stringify(evidence.slice(0, 80), null, 2), // cap at 80 snippets
+      JSON.stringify(evidence.slice(0, 80), null, 2),
     );
   }
   if (bibCandidates.length) {
@@ -179,6 +179,15 @@ Return ONLY valid JSON — no markdown fences, no prose:
 }`;
 
 // ── Conversion prompt ──────────────────────────────────────────────────────
+//
+// CRITICAL CONTRACT (enforced by this prompt):
+//   The model MUST return items[] where every element carries a "text" field
+//   containing the converted span. The client uses these to do surgical
+//   applySelectiveConversion() and then shows a preview — the user must
+//   explicitly press «Применить» before any text change is committed.
+//   convertedText is still required as a full-document fallback but items[]
+//   is the primary delivery mechanism.
+//
 const CONVERT_PROMPT = `You are an expert academic document editor specialising in
 citation reformatting, bibliography normalisation, and academic style correction.
 
@@ -198,6 +207,17 @@ Rules:
 - Return the FULL converted document in "convertedText".
 - Return individual bibEntries with "converted" fields filled.
 - Set "convertedText" to null only if no changes were needed.
+
+ITEM REPLACEMENT CONTRACT (mandatory — do not skip):
+  For EVERY span that was changed, include an entry in "items" with:
+    { "id": "c-0", "start": <char offset in ORIGINAL text>,
+      "end": <char offset in ORIGINAL text>, "text": "<converted span>",
+      "type": "inline-apa"|"inline-numeric"|"footnote"|"bibliography"|"ibid"|"quote" }
+  "start" and "end" MUST reference byte/character positions in the ORIGINAL
+  (unconverted) document, not in convertedText.
+  If nothing changed, return "items": [].
+  Example — original has "(Smith, 2019)" at chars 120-133, converted to "[1]":
+    { "id": "c-0", "start": 120, "end": 133, "text": "[1]", "type": "inline-apa" }
 
 GOST 7.0.5-2008 RULES (apply when targetStyle is "GOST"):
 - Author: Фамилия И.О. — surname first, initials with dots
@@ -219,7 +239,15 @@ Return ONLY valid JSON — no markdown fences:
   "confidence": 0.0-1.0,
   "summary": "one-sentence description of what was done",
   "convertedText": "full converted document or null",
-  "items": [],
+  "items": [
+    {
+      "id": "c-0",
+      "type": "inline-apa",
+      "start": 120,
+      "end": 133,
+      "text": "[1]"
+    }
+  ],
   "bibEntries": [
     {
       "raw": "original entry",
@@ -245,7 +273,6 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
     return;
   }
 
-  // Detect request format: Evidence-Pack (new) vs raw text (legacy)
   const isEvidencePack = (
     typeof req.body?.heuristicSummary === "object" ||
     Array.isArray(req.body?.evidence)
@@ -261,7 +288,6 @@ export async function handleAiAnalyze(req: Request, res: Response): Promise<void
       buildEvidencePackMsg(req.body as Record<string, unknown>),
     ].join("\n\n");
   } else {
-    // Legacy: raw text
     const rawText = typeof req.body?.text === "string" ? req.body.text : "";
     if (!rawText.trim()) {
       res.status(400).json({ error: "Текст не передан." });
@@ -319,7 +345,6 @@ export async function handleAiConvert(req: Request, res: Response): Promise<void
     return;
   }
 
-  // Detect Evidence-Pack vs legacy
   const isEvidencePack = (
     typeof req.body?.heuristicSummary === "object" ||
     Array.isArray(req.body?.evidence)
@@ -344,7 +369,6 @@ export async function handleAiConvert(req: Request, res: Response): Promise<void
       packMsg,
     ].join("\n\n");
   } else {
-    // Legacy: raw text
     const rawText = typeof req.body?.text === "string" ? req.body.text : "";
     if (!rawText.trim()) {
       res.status(400).json({ error: "Текст не передан." });
@@ -396,9 +420,8 @@ export async function handleAiConvert(req: Request, res: Response): Promise<void
 // ── Model info endpoint helper (for debugging / health checks) ─────────────
 export function getModelInfo(): { models: { id: string; label: string }[] } {
   return {
-    models: ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"].map((id) => ({
-      id,
-      label: modelLabel(id),
-    })),
+    models: MODEL_REGISTRY.map((m) => ({ id: m.id, label: m.label })),
   };
 }
+
+import { MODEL_REGISTRY } from "./geminiRouter.js";

@@ -1,10 +1,10 @@
 /**
  * geminiRouter.ts — Gemini model cascade with circuit-breaker
  *
- * Cascade order (as of 2026-05-21, free-tier AI Studio limits):
- *   1. gemini-2.5-flash       —  5 RPM,  20 RPD  (primary)
- *   2. gemini-3.5-flash       —  5 RPM,  20 RPD  (fallback-1)
- *   3. gemini-3.1-flash-lite  — 15 RPM, 500 RPD  (fallback-2)
+ * Cascade order (updated 2026-05-25):
+ *   1. gemini-3.1-flash-lite  — 15 RPM, 500 RPD  (primary — most stable)
+ *   2. gemini-2.5-flash       —  5 RPM,  20 RPD  (fallback-1)
+ *   3. gemini-3.5-flash       —  5 RPM,  20 RPD  (fallback-2)
  *
  * On 429 / 404 / network error: advance to next model in cascade.
  * On 503:                        retry within same model (max 2 retries).
@@ -26,9 +26,9 @@ export interface ModelMeta {
 }
 
 export const MODEL_REGISTRY: ModelMeta[] = [
+  { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite", rpm: 15, rpd:  500 },
   { id: "gemini-2.5-flash",      label: "Gemini 2.5 Flash",      rpm:  5, rpd:   20 },
   { id: "gemini-3.5-flash",      label: "Gemini 3.5 Flash",      rpm:  5, rpd:   20 },
-  { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite", rpm: 15, rpd:  500 },
 ];
 
 export const MODELS = MODEL_REGISTRY.map((m) => m.id) as
