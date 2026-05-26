@@ -1,33 +1,68 @@
-export function CodexLogo({ size = 26 }: { size?: number }) {
+/**
+ * CitaDex logo — open book with a citation mark.
+ * Uses CSS custom property --primary so the mark adopts the brand accent
+ * colour in both light and dark themes.
+ *
+ * Layout in header:
+ *   [Logo 28px]  CitaDex
+ *                Academic Citation Workspace
+ */
+export function CodexLogo({ size = 28 }: { size?: number }) {
   return (
     <svg
       width={size}
       height={size}
-      viewBox="0 0 32 32"
+      viewBox="0 0 36 36"
       fill="none"
       role="img"
       aria-label="CitaDex"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {/* Soft monogram: a stylised quotation mark sitting inside a rounded square */}
+      {/* Rounded background tile */}
       <rect
-        x="2.5"
-        y="2.5"
-        width="27"
-        height="27"
-        rx="7"
-        stroke="currentColor"
-        strokeOpacity="0.35"
-        strokeWidth="1.4"
+        x="1" y="1" width="34" height="34" rx="9"
+        fill="hsl(var(--primary) / 0.10)"
+        stroke="hsl(var(--primary) / 0.25)"
+        strokeWidth="1.2"
       />
+
+      {/* Open book — left page */}
       <path
-        d="M11.5 11.5c-2.4 0.6-4.2 2.6-4.2 5.4 0 2.4 1.6 4.1 3.8 4.1 1.7 0 3-1.2 3-2.9 0-1.6-1.2-2.7-2.7-2.7-0.3 0-0.6 0.04-0.9 0.13 0.2-1.5 1.4-2.7 2.9-3.1l-1.9-1z"
-        fill="currentColor"
+        d="M18 11 C15 10.5 11 11 9 12.5 L9 25.5 C11 24 15 23.5 18 24"
+        stroke="hsl(var(--primary))"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
+
+      {/* Open book — right page */}
       <path
-        d="M21 11.5c-2.4 0.6-4.2 2.6-4.2 5.4 0 2.4 1.6 4.1 3.8 4.1 1.7 0 3-1.2 3-2.9 0-1.6-1.2-2.7-2.7-2.7-0.3 0-0.6 0.04-0.9 0.13 0.2-1.5 1.4-2.7 2.9-3.1l-1.9-1z"
-        fill="currentColor"
+        d="M18 11 C21 10.5 25 11 27 12.5 L27 25.5 C25 24 21 23.5 18 24"
+        stroke="hsl(var(--primary))"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
+
+      {/* Spine line */}
+      <line
+        x1="18" y1="11"
+        x2="18" y2="24"
+        stroke="hsl(var(--primary) / 0.55)"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+
+      {/* Citation bracket — bottom right corner */}
+      <text
+        x="22"
+        y="30"
+        fontSize="8"
+        fontWeight="700"
+        fontFamily="Georgia, serif"
+        fill="hsl(var(--primary))"
+        letterSpacing="-0.5"
+      >[1]</text>
     </svg>
   );
 }

@@ -1,125 +1,179 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  FileText,
-  Search,
-  BookOpen,
-  Wand2,
-  PenSquare,
-  Layers,
-  Sun,
-  Moon,
-  Upload,
-  Download,
-  Link2,
-  RefreshCw,
-  CheckCircle2,
-  Hash,
-  Type,
-  AlignLeft,
-  ArrowLeftRight,
-  Filter,
-  AlertTriangle,
-  Pencil,
-  Save,
-  RotateCcw,
+  FileText, Search, BookOpen, Wand2, PenSquare, Layers, Sun, Moon,
+  Upload, Download, Link2, RefreshCw, CheckCircle2, Hash, Type,
+  AlignLeft, ArrowLeftRight, AlertTriangle, Pencil, Save,
+  RotateCcw, Bold, Italic, Underline as UnderlineIcon, List, Sparkles,
+  Zap, ChevronDown, FlaskConical,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter,
+  DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { CodexLogo } from "@/components/Logo";
 import { useTheme } from "@/components/ThemeProvider";
 import { DEMO_DOCS, SAMPLE_DOC, SAMPLE_DOC_TITLE, type DemoId } from "@/lib/sampleDoc";
 import {
-  analyzeStructure,
-  convertCitations,
-  countChars,
-  countWords,
-  detectStyle,
-  findCitations,
-  findEditorIssues,
-  DEFAULT_SOURCE_TYPES,
-  SOURCE_TYPE_FIELD_LABELS,
-  renderSourceTemplate,
-  type CitationStyle,
-  type CustomCitationRules,
-  type FoundItem,
-  type EditorIssue,
-  type SourceTypeTemplate,
+  analyzeStructure, convertCitations, countChars, countWords,
+  detectStyle, findCitations, findEditorIssues,
+  DEFAULT_SOURCE_TYPES, SOURCE_TYPE_FIELD_LABELS, renderSourceTemplate,
+  type CitationStyle, type CustomCitationRules, type FoundItem,
+  type EditorIssue, type SourceTypeTemplate,
 } from "@/lib/analyze";
 import { importFile } from "@/lib/importDoc";
 import { exportDocument, type ExportFormat } from "@/lib/exportDoc";
 import { apiRequest } from "@/lib/queryClient";
+import {
+  useAiAnalyze, useAiConvert, mergeFoundItems,
+  type AiAnalyzeResponse, type AiConvertResponse,
+  type ConvertScope, CONVERT_SCOPE_LABELS,
+} from "@/lib/aiAnalyze";
 
 type Panel = "structure" | "citations" | "style" | "convert" | "editor" | "stats";
 
 const PANEL_LABELS: Record<Panel, { label: string; icon: typeof FileText }> = {
   structure: { label: "Структура", icon: Layers },
   citations: { label: "Цитаты и сноски", icon: BookOpen },
-  style: { label: "Стиль цитирования", icon: Wand2 },
-  convert: { label: "Конвертация", icon: ArrowLeftRight },
-  editor: { label: "Редактура", icon: PenSquare },
-  stats: { label: "Статистика", icon: Hash },
+  style:     { label: "Стиль цитирования", icon: Wand2 },
+  convert:   { label: "Конвертация", icon: ArrowLeftRight },
+  editor:    { label: "Редактура", icon: PenSquare },
+  stats:     { label: "Статистика", icon: Hash },
 };
 
 const TYPE_LABELS: Record<FoundItem["type"], string> = {
-  "inline-apa": "APA-вставка",
+  "inline-apa":     "APA-вставка",
   "inline-numeric": "Числовая сноска",
-  footnote: "Сноска",
-  bibliography: "Библиография",
-  ibid: "Ibid./Там же",
-  quote: "Цитата",
+  footnote:         "Сноска",
+  bibliography:     "Библиография",
+  ibid:             "Ibid./Там же",
+  quote:            "Цитата",
 };
 
+function annotationCSSClass(kind: "citation" | "issue", type: string): string {
+  if (kind === "issue") return "ann-issue";
+  switch (type) {
+    case "inline-apa":     return "ann-apa";
+    case "inline-numeric": return "ann-numeric";
+    case "footnote":       return "ann-footnote";
+    case "bibliography":   return "ann-bib";
+    case "ibid":           return "ann-ibid";
+    case "quote":          return "ann-quote";
+    default:               return "ann-apa";
+  }
+}
+
+function legendDotClass(type: FoundItem["type"]): string {
+  switch (type) {
+    case "inline-apa":     return "legend-dot-apa";
+    case "inline-numeric": return "legend-dot-numeric";
+    case "footnote":       return "legend-dot-footnote";
+    case "bibliography":   return "legend-dot-bib";
+    case "ibid":           return "legend-dot-ibid";
+    case "quote":          return "legend-dot-quote";
+    default:               return "legend-dot-apa";
+  }
+}
+
 const ISSUE_LABELS: Record<EditorIssue["type"], string> = {
-  "длинное-предложение": "Длинное предложение",
-  "пассив": "Пассивная конструкция",
-  "разговорный-маркер": "Разговорный оборот",
-  "слабая-формулировка": "Слабая формулировка",
-  "повтор": "Повтор",
+  "длинное-предложение":      "Длинное предложение",
+  "пассив":                   "Пассивная конструкция",
+  "разговорный-маркер":       "Разговорный оборот",
+  "слабая-формулировка":      "Слабая формулировка",
+  "повтор":                   "Повтор",
   "неопределённый-указатель": "Неопределённый указатель",
-  "пунктуация": "Пунктуация",
-  "канцелярит": "Канцелярит",
+  "пунктуация":               "Пунктуация",
+  "канцелярит":               "Канцеляризм",
 };
+
+// ── Drag-to-resize hook ───────────────────────────────────────────────────────
+function useDragResize(
+  initialWidth: number,
+  minWidth: number,
+  maxWidth: number,
+  direction: "right" | "left" = "right"
+) {
+  const [width, setWidth] = useState(initialWidth);
+  const dragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(0);
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    startX.current = e.clientX;
+    startW.current = width;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, [width]);
+
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      if (!dragging.current) return;
+      const delta = direction === "right"
+        ? e.clientX - startX.current
+        : startX.current - e.clientX;
+      setWidth(Math.min(maxWidth, Math.max(minWidth, startW.current + delta)));
+    }
+    function onUp() {
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [direction, minWidth, maxWidth]);
+
+  return { width, onMouseDown };
+}
 
 export default function Workbench() {
   const { theme, toggle } = useTheme();
   const { toast } = useToast();
   const fileInput = useRef<HTMLInputElement | null>(null);
 
-  const [docName, setDocName] = useState<string>(SAMPLE_DOC_TITLE + ".txt");
-  const [text, setText] = useState<string>(SAMPLE_DOC);
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const [panel, setPanel] = useState<Panel>("citations");
-  const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState<string>("all");
-  const [selected, setSelected] = useState<{ start: number; end: number } | null>(null);
-  const [preview, setPreview] = useState<{ target: CitationStyle; text: string } | null>(null);
+  const [docName, setDocName]           = useState<string>(SAMPLE_DOC_TITLE + ".txt");
+  const [text, setText]                 = useState<string>(SAMPLE_DOC);
+  const [warnings, setWarnings]         = useState<string[]>([]);
+  const [panel, setPanel]               = useState<Panel>("citations");
+  const [search, setSearch]             = useState("");
+  const [typeFilter, setTypeFilter]     = useState<string>("all");
+  const [selected, setSelected]         = useState<{ start: number; end: number } | null>(null);
+  const [preview, setPreview]           = useState<{ target: CitationStyle; text: string } | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("docx");
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
-  const [linkUrl, setLinkUrl] = useState("");
-  const [linkLoading, setLinkLoading] = useState(false);
+  const [linkUrl, setLinkUrl]           = useState("");
+  const [linkLoading, setLinkLoading]   = useState(false);
   const [driveLoading, setDriveLoading] = useState(false);
-  const [customRules, setCustomRules] = useState<CustomCitationRules>({
+  const [aiFound, setAiFound]           = useState<FoundItem[] | null>(null);
+
+  const { analyze: runAiAnalysis, loading: aiAnalyzeLoading, data: aiAnalyzeData, error: aiAnalyzeError } = useAiAnalyze();
+  const { convert: runAiConvert, loading: aiConvertLoading, data: aiConvertData, error: aiConvertError } = useAiConvert();
+
+  const aiLoading = aiAnalyzeLoading || aiConvertLoading;
+  const aiData    = aiAnalyzeData;
+  const aiError   = aiAnalyzeError || aiConvertError;
+
+  const [aiSetupOpen, setAiSetupOpen]   = useState(false);
+  const [aiTargetStyle, setAiTargetStyle] = useState<CitationStyle | null>(null);
+  const [customRules, setCustomRules]   = useState<CustomCitationRules>({
     name: "Авторский стандарт",
     mode: "author-date",
     inlineTemplate: "({author}, {year})",
@@ -127,25 +181,83 @@ export default function Workbench() {
     footnoteTemplate: "{n}. {author}. {title}. {source}, {year}.",
     separator: "; ",
   });
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [editMode, setEditMode] = useState(false);
-  const [draft, setDraft] = useState<string>(SAMPLE_DOC);
+  const [hoveredId, setHoveredId]       = useState<string | null>(null);
+  const [editMode, setEditMode]         = useState(false);
+  const [draft, setDraft]               = useState<string>(SAMPLE_DOC);
+  const [convertScopes, setConvertScopes] = useState<ConvertScope[]>(["citations", "bibliography"]);
 
-  const found = useMemo(() => findCitations(text), [text]);
-  const detected = useMemo(() => detectStyle(text, found), [text, found]);
-  const structure = useMemo(() => analyzeStructure(text), [text]);
-  const issues = useMemo(() => findEditorIssues(text), [text]);
-  const stats = useMemo(
-    () => ({
-      words: countWords(text),
-      charsWithSpaces: countChars(text, true),
-      charsNoSpaces: countChars(text, false),
-      paragraphs: structure.paragraphs,
-      lines: text.split("\n").length,
-      readingMinutes: Math.max(1, Math.round(countWords(text) / 180)),
-    }),
-    [text, structure.paragraphs]
+  const sidebar    = useDragResize(224, 160, 320, "right");
+  const rightPanel = useDragResize(360, 260, 560, "left");
+
+  const heuristicFound = useMemo(() => findCitations(text), [text]);
+  const found = useMemo(
+    () => aiFound ? mergeFoundItems(heuristicFound, aiFound) : heuristicFound,
+    [heuristicFound, aiFound],
   );
+  const detected  = useMemo(() => detectStyle(text, found), [text, found]);
+  const structure = useMemo(() => analyzeStructure(text), [text]);
+  const issues    = useMemo(() => findEditorIssues(text), [text]);
+  const stats     = useMemo(() => ({
+    words:            countWords(text),
+    charsWithSpaces:  countChars(text, true),
+    charsNoSpaces:    countChars(text, false),
+    paragraphs:       structure.paragraphs,
+    lines:            text.split("\n").length,
+    readingMinutes:   Math.max(1, Math.round(countWords(text) / 180)),
+  }), [text, structure.paragraphs]);
+
+  // ── AI Analyze (structure + citation markup) ──────────────────────────────
+  async function handleAiAnalyze() {
+    if (!text.trim()) return;
+    const result = await runAiAnalysis({ text, language: structure.language });
+    if (!result) return;
+
+    if (result.items?.length) setAiFound(result.items as FoundItem[]);
+
+    if (result.error) {
+      const msg = result.error;
+      if (msg.includes("GEMINI_API_KEY") || msg.includes("501") || msg.includes("не задан")) setAiSetupOpen(true);
+      toast({ title: "AI недоступен", description: msg, variant: "destructive" });
+      return;
+    }
+    toast({
+      title: "AI-анализ завершён",
+      description: result.summary ||
+        `Найдено ${result.items?.length ?? 0} элементов` +
+        (result.confidence ? ` (уверенность ${Math.round(result.confidence * 100)}%)` : "") + ".",
+    });
+  }
+
+  // ── AI Convert (targeted conversion) ─────────────────────────────────────
+  async function handleAiConvert(targetStyle: CitationStyle, scopes: ConvertScope[]) {
+    if (!text.trim()) return;
+    const result = await runAiConvert({ text, targetStyle, language: structure.language, scopes });
+    if (!result) return;
+
+    if (result.error) {
+      const msg = result.error;
+      if (msg.includes("GEMINI_API_KEY") || msg.includes("501") || msg.includes("не задан")) setAiSetupOpen(true);
+      toast({ title: "AI недоступен", description: msg, variant: "destructive" });
+      return;
+    }
+
+    if (result.convertedText && result.convertedText.trim()) {
+      setText(result.convertedText);
+      setDraft(result.convertedText);
+      setPreview(null);
+      setAiTargetStyle(targetStyle);
+      toast({
+        title: "AI-конвертация применена",
+        description: result.summary || `Документ переформатирован в ${targetStyle}. Проверьте вручную.`,
+      });
+    } else {
+      setAiTargetStyle(targetStyle);
+      toast({
+        title: "AI-конвертация",
+        description: "Gemini не вернул изменений — документ уже в нужном формате или изменения не найдены.",
+      });
+    }
+  }
 
   const filteredFound = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -167,116 +279,86 @@ export default function Workbench() {
     }
     setDocName(imported.name);
     setText(imported.text);
+    setDraft(imported.text);
     setWarnings(imported.warnings);
-    setPreview(null);
-    setSelected(null);
-    toast({ title: "Документ загружен", description: imported.name });
+    setPreview(null); setSelected(null); setAiFound(null); setAiTargetStyle(null);
+    if (imported.warnings.length > 0) {
+      toast({ title: "Файл загружен с предупреждениями", description: imported.warnings[0] });
+    }
   }
 
   async function handleUrlImport() {
-    const url = linkUrl.trim();
-    if (!url) {
-      toast({ title: "Нужна ссылка", description: "Вставьте публичную ссылку на DOCX, Google Doc, Google Drive, TXT, MD или HTML." });
-      return;
-    }
-
+    if (!linkUrl.trim()) return;
     setLinkLoading(true);
     try {
-      const res = await apiRequest("POST", "/api/import-url", { url });
-      const imported = await res.json() as { name: string; text: string; warnings?: string[]; sourceUrl?: string };
-      if (!imported.text) throw new Error("Документ пуст или недоступен.");
-      setDocName(imported.name);
-      setText(imported.text);
-      setWarnings(imported.warnings ?? []);
-      setPreview(null);
-      setSelected(null);
-      setLinkDialogOpen(false);
-      setLinkUrl("");
-      toast({ title: "Документ загружен по ссылке", description: imported.name });
+      const res = await apiRequest("POST", "/api/import-url", { url: linkUrl });
+      const data = await res.json() as { text?: string; name?: string; warnings?: string[]; message?: string };
+      if (!res.ok) {
+        toast({ title: "Не удалось загрузить ссылку", description: data.message ?? "Проверьте, что документ доступен публично.", variant: "destructive" });
+        return;
+      }
+      setDocName(data.name ?? "документ.txt");
+      setText(data.text ?? ""); setDraft(data.text ?? "");
+      setWarnings(data.warnings ?? []);
+      setPreview(null); setSelected(null); setLinkDialogOpen(false); setLinkUrl(""); setAiFound(null); setAiTargetStyle(null);
+      if (data.warnings?.length) toast({ title: "Импорт завершён с предупреждениями", description: data.warnings[0] });
     } catch (error) {
-      toast({
-        title: "Не удалось загрузить ссылку",
-        description: error instanceof Error ? error.message : "Проверьте, что документ доступен публично.",
-      });
+      toast({ title: "Не удалось загрузить ссылку", description: error instanceof Error ? error.message : "Проверьте, что документ доступен публично." });
     } finally {
       setLinkLoading(false);
     }
   }
 
   async function handleExport() {
+    const currentText = preview?.text ?? text;
     try {
       await exportDocument(currentText, docName, exportFormat);
       toast({ title: "Файл подготовлен", description: `Экспорт в ${exportFormat.toUpperCase()} запущен.` });
     } catch (error) {
-      toast({
-        title: "Экспорт не удался",
-        description: error instanceof Error ? error.message : "Попробуйте другой формат.",
-      });
+      toast({ title: "Экспорт не удался", description: error instanceof Error ? error.message : "Попробуйте другой формат." });
     }
   }
 
   async function handleDriveExport() {
+    const currentText = preview?.text ?? text;
     const ok = window.confirm("Экспорт создаст новый файл в вашем Google Drive. Продолжить?");
     if (!ok) return;
     setDriveLoading(true);
     try {
-      const res = await apiRequest("POST", "/api/export-drive", {
-        text: currentText,
-        docName,
-        format: exportFormat,
-      });
+      const res = await apiRequest("POST", "/api/export-drive", { text: currentText, docName, format: exportFormat });
       const payload = await res.json() as { url?: string; message?: string; name?: string };
-      toast({
-        title: "Файл отправлен в Google Drive",
-        description: payload.url || payload.name || payload.message || "Проверьте Google Drive.",
-      });
+      toast({ title: "Файл отправлен в Google Drive", description: payload.url || payload.name || payload.message || "Проверьте Google Drive." });
     } catch (error) {
-      toast({
-        title: "Экспорт в Drive не удался",
-        description: error instanceof Error ? error.message : "Проверьте подключение Google Drive.",
-      });
+      toast({ title: "Экспорт в Drive не удался", description: error instanceof Error ? error.message : "Проверьте подключение." });
     } finally {
       setDriveLoading(false);
     }
   }
 
-  function loadDemo(which: DemoId) {
-    const demo = DEMO_DOCS.find((d) => d.id === which);
-    if (!demo) return;
-    setText(demo.text);
-    setDocName(demo.title + ".txt");
-    setWarnings([]);
-    setPreview(null);
-    setSelected(null);
-    setEditMode(false);
-    toast({ title: "Демо-документ загружен", description: demo.label });
+  function loadDemo(id: DemoId) {
+    const doc = DEMO_DOCS.find((d) => d.id === id);
+    if (!doc) return;
+    setText(doc.text); setDraft(doc.text); setDocName(doc.label + ".txt");
+    setPreview(null); setSelected(null); setSearch(""); setTypeFilter("all"); setWarnings([]); setAiFound(null); setAiTargetStyle(null);
   }
 
-  function runConvert(target: CitationStyle) {
-    const result = convertCitations(text, target, customRules);
-    setPreview({ target, text: result.preview });
-    toast({
-      title: `Предпросмотр преобразования → ${target}`,
-      description: `Найдено изменений: ${result.changes.length}. Просмотрите и примените.`,
-    });
-  }
-
-  function applyPreview() {
+  function applyConversion() {
     if (!preview) return;
-    setText(preview.text);
-    setPreview(null);
-    toast({ title: "Изменения применены", description: "Документ обновлён согласно предпросмотру." });
+    const t = preview.target;
+    setText(preview.text); setDraft(preview.text); setPreview(null); setAiFound(null); setAiTargetStyle(null);
+    toast({ title: "Конвертация применена", description: `Документ переформатирован в ${t}.` });
   }
 
   const currentText = preview?.text ?? text;
+  const aiAnalyzeOk = !aiAnalyzeLoading && !!aiAnalyzeData && !aiAnalyzeError;
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground" data-testid="app-root">
-      {/* Top bar */}
-      <header className="flex items-center gap-3 px-4 h-14 border-b bg-sidebar min-w-0" data-testid="topbar">
-        <div className="flex items-center gap-2.5 text-primary shrink-0">
+    <div className="flex flex-col h-screen bg-background text-foreground" data-testid="workbench">
+      {/* ── Header ──────────────────────────────────────────────────────────── */}
+      <header className="h-14 border-b flex items-center px-4 gap-3 shrink-0 bg-background/80 backdrop-blur" data-testid="header">
+        <div className="flex items-center gap-2.5">
           <CodexLogo size={28} />
-          <div className="leading-none">
+          <div className="leading-none select-none">
             <div className="text-[15px] font-semibold tracking-tight text-foreground">CitaDex</div>
             <div className="text-[11px] text-muted-foreground -mt-0.5">Academic Citation Workspace</div>
           </div>
@@ -284,44 +366,18 @@ export default function Workbench() {
         <Separator orientation="vertical" className="h-7 mx-2" />
         <div className="flex items-center gap-2 text-sm min-w-0">
           <FileText className="h-4 w-4 text-muted-foreground" />
-          <span className="font-medium truncate max-w-[28ch]" data-testid="text-docname">
-            {docName}
-          </span>
-          <Badge variant="outline" className="text-[10px] uppercase tracking-wide ml-1">
-            демо-документ
-          </Badge>
+          <span className="font-medium truncate max-w-[28ch]" data-testid="text-docname">{docName}</span>
         </div>
-        <div className="ml-auto flex items-center gap-2 shrink-0 overflow-x-auto">
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".docx,.txt,.md"
-            onChange={handleFile}
-            className="hidden"
-            data-testid="input-file"
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => fileInput.current?.click()}
-            data-testid="button-import"
-          >
-            <Upload className="h-4 w-4 mr-1.5" />
-            Импорт
+        <div className="ml-auto flex items-center gap-2 shrink-0">
+          <input ref={fileInput} type="file" accept=".docx,.txt,.md" onChange={handleFile} className="hidden" data-testid="input-file" />
+          <Button variant="outline" size="sm" onClick={() => fileInput.current?.click()} data-testid="button-import">
+            <Upload className="h-4 w-4 mr-1.5" />Импорт
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setLinkDialogOpen(true)}
-            data-testid="button-import-link"
-          >
-            <Link2 className="h-4 w-4 mr-1.5" />
-            Ссылка
+          <Button variant="outline" size="sm" onClick={() => setLinkDialogOpen(true)} data-testid="button-import-link">
+            <Link2 className="h-4 w-4 mr-1.5" />Ссылка
           </Button>
           <Select value={exportFormat} onValueChange={(v) => setExportFormat(v as ExportFormat)}>
-            <SelectTrigger className="h-9 w-[112px]" data-testid="select-export-format">
-              <SelectValue />
-            </SelectTrigger>
+            <SelectTrigger className="h-9 w-[112px]" data-testid="select-export-format"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="docx">DOCX</SelectItem>
               <SelectItem value="txt">TXT</SelectItem>
@@ -329,1084 +385,287 @@ export default function Workbench() {
               <SelectItem value="html">HTML</SelectItem>
             </SelectContent>
           </Select>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleExport}
-            data-testid="button-export"
-          >
-            <Download className="h-4 w-4 mr-1.5" />
-            Экспорт
+          <Button variant="outline" size="sm" onClick={handleExport} data-testid="button-export">
+            <Download className="h-4 w-4 mr-1.5" />Экспорт
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleDriveExport}
-            disabled={driveLoading}
-            data-testid="button-export-drive"
-          >
-            <Upload className="h-4 w-4 mr-1.5" />
-            {driveLoading ? "Drive…" : "В Drive"}
+          <Button variant="outline" size="sm" onClick={handleDriveExport} disabled={driveLoading} data-testid="button-export-drive">
+            <Upload className="h-4 w-4 mr-1.5" />{driveLoading ? "Drive…" : "В Drive"}
           </Button>
-          <Select onValueChange={(v) => loadDemo(v as DemoId)}>
-            <SelectTrigger className="h-9 w-[180px]" data-testid="select-demo">
-              <SelectValue placeholder="Демо-документ" />
-            </SelectTrigger>
-            <SelectContent>
-              {DEMO_DOCS.map((d) => (
-                <SelectItem key={d.id} value={d.id}>{d.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <Button variant="outline" size="sm" onClick={handleAiAnalyze} disabled={aiLoading || !text.trim()} data-testid="button-ai-analyze"
+            title="Анализ структуры, блоков и цитирования через Gemini AI">
+            <Sparkles className="h-4 w-4 mr-1.5" />{aiAnalyzeLoading ? "Анализ…" : "AI-анализ"}
+          </Button>
           <Button variant="ghost" size="icon" onClick={toggle} data-testid="button-theme">
             {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </Button>
         </div>
       </header>
 
+      {/* ── AI Status bar ───────────────────────────────────────────────────── */}
+      {(aiLoading || aiAnalyzeData || aiError) && (
+        <div className="h-7 border-b px-4 flex items-center gap-2 text-[11px] bg-muted/40">
+          <Sparkles className="h-3.5 w-3.5 text-primary" />
+          {aiLoading && <span>{aiAnalyzeLoading ? "AI-анализ" : "AI-конвертация"} выполняется…</span>}
+          {aiAnalyzeOk && !aiLoading && (
+            <span>
+              AI-анализ: {aiAnalyzeData!.items.length} элементов, стиль {aiAnalyzeData!.detectedStyle}{" "}
+              ({Math.round((aiAnalyzeData!.confidence ?? 0) * 100)}%).
+              {aiAnalyzeData!.structureSummary && <> · {aiAnalyzeData!.structureSummary}</>}
+            </span>
+          )}
+          {aiConvertData && !aiLoading && aiTargetStyle && (
+            <span className="ml-2 text-primary">
+              · Конвертация в <strong>{aiTargetStyle}</strong> применена.
+            </span>
+          )}
+          {!aiLoading && aiError && (
+            <button type="button" className="text-destructive underline-offset-2 hover:underline" onClick={() => setAiSetupOpen(true)}>
+              AI недоступен: {aiError}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ── Import-by-link dialog ──────────────────────────────────────────── */}
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
         <DialogContent className="sm:max-w-xl" data-testid="dialog-import-link">
           <DialogHeader>
             <DialogTitle>Импорт документа по ссылке</DialogTitle>
-            <DialogDescription>
-              Поддерживаются публичные ссылки на DOCX/TXT/MD/HTML, Google Docs и Google Drive. Для закрытых документов сначала откройте доступ по ссылке.
-            </DialogDescription>
+            <DialogDescription>Поддерживаются публичные ссылки на DOCX/TXT/MD/HTML, Google Docs и Google Drive.</DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Input
-              value={linkUrl}
-              onChange={(e) => setLinkUrl(e.target.value)}
-              placeholder="https://docs.google.com/document/d/… или https://drive.google.com/file/d/…"
-              data-testid="input-import-link"
-            />
-            <p className="text-xs text-muted-foreground leading-snug">
-              Экспорт обратно в Google Drive/Docs требует авторизации Google; в прототипе доступен скачиваемый файл, который можно загрузить в облако вручную.
-            </p>
+            <Input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)}
+              placeholder="https://docs.google.com/document/d/…" data-testid="input-import-link" />
+            <p className="text-xs text-muted-foreground leading-snug">Для закрытых документов сначала откройте доступ по ссылке.</p>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setLinkDialogOpen(false)} data-testid="button-cancel-link">
-              Отмена
-            </Button>
-            <Button onClick={handleUrlImport} disabled={linkLoading} data-testid="button-load-link">
-              {linkLoading ? "Загрузка…" : "Загрузить"}
-            </Button>
+            <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>Отмена</Button>
+            <Button onClick={handleUrlImport} disabled={linkLoading}>{linkLoading ? "Загрузка…" : "Загрузить"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <div className="flex flex-1 min-h-0">
-        {/* Sidebar */}
-        <aside className="w-56 shrink-0 border-r bg-sidebar/60 flex flex-col" data-testid="sidebar">
-          <nav className="p-2 space-y-0.5">
+      {/* ── AI Setup dialog ────────────────────────────────────────────────── */}
+      <Dialog open={aiSetupOpen} onOpenChange={setAiSetupOpen}>
+        <DialogContent className="sm:max-w-lg" data-testid="dialog-ai-setup">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-primary" />Настройка AI-анализа
+            </DialogTitle>
+            <DialogDescription>AI-анализ использует Google Gemini для точного распознавания цитат и стилей.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-[13px]">
+            <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/5 p-3 space-y-1.5">
+              <div className="font-semibold text-yellow-600 dark:text-yellow-400">Требуется GEMINI_API_KEY</div>
+              <div className="text-muted-foreground leading-snug">
+                Переменная окружения <code className="font-mono bg-muted px-1 rounded text-[12px]">GEMINI_API_KEY</code> не задана на сервере.
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <div className="font-medium">Как активировать:</div>
+              <ol className="list-decimal list-inside space-y-1 text-muted-foreground leading-snug">
+                <li>Получите ключ на <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-primary underline">aistudio.google.com/apikey</a></li>
+                <li>Создайте файл <code className="font-mono bg-muted px-1 rounded text-[12px]">.env</code> в корне проекта</li>
+                <li>Добавьте строку:<br /><code className="font-mono bg-muted px-1.5 py-1 rounded text-[12px] mt-1 block">GEMINI_API_KEY=AIza…ваш_ключ…</code></li>
+                <li>Перезапустите сервер: <code className="font-mono bg-muted px-1 rounded text-[12px]">npm run dev</code></li>
+              </ol>
+            </div>
+          </div>
+          <DialogFooter><Button onClick={() => setAiSetupOpen(false)}>Понятно</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        {/* ── Sidebar ───────────────────────────────────────────────────────── */}
+        <aside
+          className="shrink-0 border-r bg-sidebar/60 flex flex-col min-h-0 overflow-hidden"
+          style={{ width: sidebar.width }}
+          data-testid="sidebar"
+        >
+          <nav className="p-2 space-y-0.5 shrink-0">
             {(Object.keys(PANEL_LABELS) as Panel[]).map((k) => {
               const Icon = PANEL_LABELS[k].icon;
               const active = panel === k;
               return (
-                <button
-                  key={k}
-                  onClick={() => setPanel(k)}
-                  data-testid={`nav-${k}`}
+                <button key={k} onClick={() => setPanel(k)} data-testid={`nav-${k}`}
                   className={`w-full flex items-center gap-2.5 rounded-md px-3 py-2 text-sm hover-elevate active-elevate-2 text-left ${
-                    active
-                      ? "bg-primary/10 text-primary font-medium"
-                      : "text-foreground/80"
-                  }`}
-                >
-                  <Icon className="h-4 w-4" />
-                  {PANEL_LABELS[k].label}
-                  {k === "citations" && (
-                    <span className="ml-auto text-[10px] font-mono text-muted-foreground">
-                      {found.length}
-                    </span>
-                  )}
-                  {k === "editor" && issues.length > 0 && (
-                    <span className="ml-auto text-[10px] font-mono text-muted-foreground">
-                      {issues.length}
-                    </span>
-                  )}
+                    active ? "bg-primary/10 text-primary font-medium" : "text-foreground/80"
+                  }`}>
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="truncate">{PANEL_LABELS[k].label}</span>
+                  {k === "citations" && <span className="ml-auto text-[10px] font-mono text-muted-foreground shrink-0">{found.length}</span>}
+                  {k === "editor" && issues.length > 0 && <span className="ml-auto text-[10px] font-mono text-muted-foreground shrink-0">{issues.length}</span>}
                 </button>
               );
             })}
           </nav>
-          <div className="mt-auto p-3 text-[11px] text-muted-foreground leading-snug border-t">
-            Прототип академической редактуры и работы с цитатами. Преобразования эвристические — проверяйте вручную.
-          </div>
-        </aside>
 
-        {/* Workspace */}
-        <main className="flex-1 min-w-0 flex flex-col">
-          <div className="flex items-center gap-2 px-4 h-11 border-b bg-card/40" data-testid="document-toolbar">
-            <Badge variant="secondary" className="font-mono text-[10px]">
-              {preview ? `ПРЕДПРОСМОТР → ${preview.target}` : editMode ? "РЕДАКТИРОВАНИЕ" : "ИСХОДНИК"}
-            </Badge>
-            {preview && (
-              <>
-                <Button size="sm" onClick={applyPreview} data-testid="button-apply">
-                  <CheckCircle2 className="h-4 w-4 mr-1.5" />
-                  Применить
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setPreview(null)}
-                  data-testid="button-discard"
-                >
-                  Отменить
-                </Button>
-              </>
-            )}
-            {!preview && !editMode && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setDraft(text);
-                  setEditMode(true);
-                  setSelected(null);
-                }}
-                data-testid="button-edit"
-              >
-                <Pencil className="h-4 w-4 mr-1.5" />
-                Редактировать
-              </Button>
-            )}
-            {editMode && (
-              <>
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    setText(draft);
-                    setEditMode(false);
-                    setSelected(null);
-                    setPreview(null);
-                    toast({ title: "Изменения сохранены", description: "Анализ перезапущен по обновлённому тексту." });
-                  }}
-                  data-testid="button-save-edit"
-                >
-                  <Save className="h-4 w-4 mr-1.5" />
-                  Сохранить
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setDraft(text);
-                    setEditMode(false);
-                  }}
-                  data-testid="button-cancel-edit"
-                >
-                  <RotateCcw className="h-4 w-4 mr-1.5" />
-                  Сбросить
-                </Button>
-              </>
-            )}
-            <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground font-mono">
-              <span className="inline-flex items-center gap-1">
-                <Type className="h-3.5 w-3.5" /> {stats.words} слов
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <AlignLeft className="h-3.5 w-3.5" /> {stats.paragraphs} абз.
-              </span>
-              <span>≈ {stats.readingMinutes} мин чтения</span>
-            </div>
+          {/* Demo document selector — relocated from header */}
+          <div className="px-2 pt-1 pb-2 shrink-0">
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono mb-1 px-1">Демо</div>
+            <Select onValueChange={(v) => loadDemo(v as DemoId)}>
+              <SelectTrigger className="h-8 w-full text-[12px]" data-testid="select-demo">
+                <FlaskConical className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
+                <SelectValue placeholder="Загрузить документ…" />
+              </SelectTrigger>
+              <SelectContent>
+                {DEMO_DOCS.map((d) => (<SelectItem key={d.id} value={d.id}>{d.label}</SelectItem>))}
+              </SelectContent>
+            </Select>
           </div>
 
-          {editMode ? (
-            <DocumentEditor draft={draft} onChange={setDraft} />
-          ) : (
-            <DocumentView
-              text={currentText}
-              selected={selected}
-              annotations={found}
-              issues={issues}
-              hoveredId={hoveredId}
-              onAnnotationClick={(it) => setSelected({ start: it.start, end: it.end })}
-            />
-          )}
+          <Separator />
 
-          {warnings.length > 0 && (
-            <div className="border-t bg-secondary/40 px-4 py-2 text-xs text-muted-foreground flex items-start gap-2" data-testid="warnings">
-              <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-[hsl(var(--chart-2))]" />
-              <div className="space-y-0.5">
-                {warnings.map((w, i) => (
-                  <div key={i}>{w}</div>
-                ))}
+          <div className="mt-3 px-3 pb-2 shrink-0">
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono mb-1.5">Легенда</div>
+            <div className="space-y-1">
+              {(Object.entries(TYPE_LABELS) as [FoundItem["type"], string][]).map(([t, l]) => (
+                <div key={t} className="flex items-center gap-1.5 text-[11px] text-foreground/75">
+                  <span className={`legend-dot ${legendDotClass(t)} shrink-0`} />
+                  <span className="truncate">{l}</span>
+                </div>
+              ))}
+              <div className="flex items-center gap-1.5 text-[11px] text-foreground/75">
+                <span className="legend-dot legend-dot-issue shrink-0" />
+                <span className="truncate">Замечание редактуры</span>
               </div>
             </div>
-          )}
-        </main>
-
-        {/* Inspector */}
-        <aside className="w-[380px] shrink-0 border-l flex flex-col bg-card/30" data-testid="inspector">
-          {panel === "citations" && (
-            <CitationsPanel
-              items={filteredFound}
-              total={found.length}
-              search={search}
-              setSearch={setSearch}
-              typeFilter={typeFilter}
-              setTypeFilter={setTypeFilter}
-              onSelect={(it) => setSelected({ start: it.start, end: it.end })}
-            />
-          )}
-          {panel === "style" && <StylePanel detected={detected} />}
-          {panel === "convert" && (
-            <ConvertPanel
-              detected={detected.style}
-              onRun={runConvert}
-              text={text}
-              customRules={customRules}
-              setCustomRules={setCustomRules}
-              previewActive={!!preview}
-              applyPreview={applyPreview}
-              onDiscard={() => setPreview(null)}
-            />
-          )}
-          {panel === "structure" && <StructurePanel structure={structure} onJump={(line) => {
-            const lines = text.split("\n");
-            let pos = 0;
-            for (let i = 0; i < line - 1 && i < lines.length; i++) pos += lines[i].length + 1;
-            setSelected({ start: pos, end: pos + (lines[line - 1]?.length ?? 0) });
-          }} />}
-          {panel === "editor" && (
-            <EditorPanel issues={issues} onSelect={(i) => setSelected({ start: i.start, end: i.end })} />
-          )}
-          {panel === "stats" && <StatsPanel stats={stats} found={found} issues={issues} detected={detected} />}
+          </div>
+          <div className="mt-auto p-3 text-[11px] text-muted-foreground leading-snug border-t shrink-0">
+            Прототип. Преобразования эвристические — проверяйте вручную.
+          </div>
         </aside>
+
+        {/* ── Sidebar resize handle ─────────────────────────────────────────── */}
+        <div
+          onMouseDown={sidebar.onMouseDown}
+          className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
+          title="Потяните, чтобы изменить ширину"
+        />
+
+        {/* ── Workspace ─────────────────────────────────────────────────────── */}
+        <main className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
+          <section className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
+            <div className="h-10 border-b flex items-center px-4 gap-3 shrink-0 bg-muted/30">
+              <AlignLeft className="h-4 w-4 text-muted-foreground" />
+              <span className="text-[13px] text-muted-foreground font-medium">
+                {preview ? `ПРЕДПРОСМОТР → ${preview.target}` : editMode ? "РЕДАКТИРОВАНИЕ" : "ПРОСМОТР"}
+              </span>
+              {warnings.length > 0 && (
+                <div className="flex items-center gap-1 text-[11px] text-warning ml-2">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  {warnings[0]}
+                </div>
+              )}
+              {!preview && !editMode && (
+                <Button variant="ghost" size="sm" className="ml-auto h-7 text-[12px]" onClick={() => setEditMode(true)} data-testid="button-edit">
+                  <Pencil className="h-3.5 w-3.5 mr-1" />Редактировать
+                </Button>
+              )}
+              {editMode && (
+                <div className="ml-auto flex gap-1.5">
+                  <Button size="sm" onClick={() => { setText(draft); setEditMode(false); setSelected(null); setPreview(null); setAiFound(null); toast({ title: "Изменения сохранены" }); }} data-testid="button-save-edit">
+                    <Save className="h-3.5 w-3.5 mr-1" />Сохранить
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => { setDraft(text); setEditMode(false); }} data-testid="button-cancel-edit">
+                    <RotateCcw className="h-3.5 w-3.5 mr-1" />Отменить
+                  </Button>
+                </div>
+              )}
+              {preview && (
+                <div className="ml-auto flex gap-1.5">
+                  <Button size="sm" onClick={applyConversion} data-testid="button-apply-preview">
+                    <CheckCircle2 className="h-3.5 w-3.5 mr-1" />Применить
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setPreview(null)} data-testid="button-discard-preview">
+                    <RotateCcw className="h-3.5 w-3.5 mr-1" />Отменить
+                  </Button>
+                </div>
+              )}
+            </div>
+            <ScrollArea className="flex-1 min-h-0">
+              {editMode ? (
+                <RichEditor draft={draft} onChange={setDraft} />
+              ) : (
+                <DocumentView
+                  text={currentText}
+                  annotations={found}
+                  issues={editMode ? [] : issues}
+                  selected={selected}
+                  hoveredId={hoveredId}
+                  onAnnotationClick={(item) => { setSelected({ start: item.start, end: item.end }); setPanel("citations"); }}
+                />
+              )}
+            </ScrollArea>
+          </section>
+
+          {/* ── Right panel resize handle ─────────────────────────────────── */}
+          <div
+            onMouseDown={rightPanel.onMouseDown}
+            className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors border-l"
+            title="Потяните, чтобы изменить ширину"
+          />
+
+          <section
+            className="shrink-0 flex flex-col min-h-0 overflow-hidden"
+            style={{ width: rightPanel.width }}
+            data-testid="right-panel"
+          >
+            <div className="h-10 border-b flex items-center px-4 shrink-0 bg-muted/30">
+              <Type className="h-4 w-4 text-muted-foreground mr-2 shrink-0" />
+              <span className="text-[13px] text-muted-foreground font-medium uppercase tracking-wide truncate">{PANEL_LABELS[panel].label}</span>
+            </div>
+            <ScrollArea className="flex-1 min-h-0">
+              <div className="p-4">
+                {panel === "citations" && <CitationsPanel items={filteredFound} total={found.length}
+                  search={search} setSearch={setSearch}
+                  typeFilter={typeFilter} setTypeFilter={setTypeFilter}
+                  onSelect={(item) => setSelected({ start: item.start, end: item.end })}
+                  onHover={setHoveredId} />}
+                {panel === "style" && <StylePanel detected={detected} />}
+                {panel === "convert" && (
+                  <ConvertPanel
+                    detected={detected} text={text}
+                    customRules={customRules} setCustomRules={setCustomRules}
+                    previewActive={!!preview} applyPreview={applyConversion}
+                    onDiscard={() => setPreview(null)}
+                    onRun={(target, converted) => setPreview({ target, text: converted })}
+                    aiLoading={aiConvertLoading}
+                    convertScopes={convertScopes}
+                    setConvertScopes={setConvertScopes}
+                    onAiConvert={handleAiConvert}
+                  />
+                )}
+                {panel === "structure" && <StructurePanel structure={structure} onJump={() => {}} />}
+                {panel === "editor" && <EditorPanel issues={issues} onSelect={(i) => { setSelected({ start: i.start, end: i.end }); }} />}
+                {panel === "stats" && <StatsPanel stats={stats} found={found} issues={issues} detected={detected} />}
+              </div>
+            </ScrollArea>
+          </section>
+        </main>
       </div>
     </div>
   );
 }
 
-// --- Document view --------------------------------------------------------
-
-interface Annotation {
-  start: number;
-  end: number;
-  kind: "citation" | "issue";
-  type: string;
-  id: string;
-  note?: string;
-  label: string;
-}
-
-function annotationClass(kind: Annotation["kind"], type: string): string {
-  // Returns Tailwind classes for soft background + ring + hover state.
-  if (kind === "issue") {
-    return "bg-[hsl(var(--chart-2)/0.14)] hover:bg-[hsl(var(--chart-2)/0.22)] underline decoration-[hsl(var(--chart-2))] decoration-dotted underline-offset-[3px]";
-  }
-  switch (type) {
-    case "inline-apa":
-    case "inline-numeric":
-      return "bg-[hsl(var(--primary)/0.12)] hover:bg-[hsl(var(--primary)/0.22)] ring-1 ring-inset ring-[hsl(var(--primary)/0.35)]";
-    case "footnote":
-      return "bg-[hsl(var(--chart-4)/0.18)] hover:bg-[hsl(var(--chart-4)/0.28)] ring-1 ring-inset ring-[hsl(var(--chart-4)/0.55)]";
-    case "bibliography":
-      return "bg-[hsl(var(--chart-3)/0.12)] hover:bg-[hsl(var(--chart-3)/0.20)] ring-1 ring-inset ring-[hsl(var(--chart-3)/0.40)]";
-    case "quote":
-      return "bg-[hsl(var(--chart-5)/0.12)] hover:bg-[hsl(var(--chart-5)/0.20)] ring-1 ring-inset ring-[hsl(var(--chart-5)/0.40)]";
-    case "ibid":
-      return "bg-[hsl(var(--chart-1)/0.14)] hover:bg-[hsl(var(--chart-1)/0.24)] ring-1 ring-inset ring-[hsl(var(--chart-1)/0.40)]";
-    default:
-      return "bg-primary/10 hover:bg-primary/20 ring-1 ring-inset ring-primary/30";
-  }
-}
-
-function DocumentView({
-  text,
-  selected,
-  annotations,
-  issues,
-  hoveredId,
-  onAnnotationClick,
-}: {
+// ── DocumentView ──────────────────────────────────────────────────────────────
+function DocumentView({ text, annotations, issues, selected, hoveredId, onAnnotationClick }: {
   text: string;
-  selected: { start: number; end: number } | null;
   annotations: FoundItem[];
   issues: EditorIssue[];
-  hoveredId: string | null;
-  onAnnotationClick: (it: FoundItem) => void;
-}) {
-  // Combine citations and editor issues into a single ordered annotation list.
-  // Resolve overlaps: keep the longer span; if equal, citation wins.
-  const merged: Annotation[] = useMemo(() => {
-    const all: Annotation[] = [];
-    for (const f of annotations) {
-      all.push({
-        start: f.start,
-        end: f.end,
-        kind: "citation",
-        type: f.type,
-        id: f.id,
-        note: f.note,
-        label: f.type,
-      });
-    }
-    for (const i of issues) {
-      all.push({
-        start: i.start,
-        end: i.end,
-        kind: "issue",
-        type: i.type,
-        id: i.id,
-        note: i.suggestion,
-        label: i.type,
-      });
-    }
-    // sort by start; on ties, longer span first so we can drop fully-contained later items.
-    all.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
-    const cleaned: Annotation[] = [];
-    let lastEnd = -1;
-    for (const a of all) {
-      if (a.start < lastEnd) continue; // skip overlapping/contained
-      cleaned.push(a);
-      lastEnd = a.end;
-    }
-    return cleaned;
-  }, [annotations, issues]);
-
-  // Build flat segments for rendering
-  type Segment = { start: number; end: number; ann?: Annotation };
-  const segments: Segment[] = useMemo(() => {
-    const segs: Segment[] = [];
-    let cursor = 0;
-    for (const a of merged) {
-      if (a.start > cursor) segs.push({ start: cursor, end: a.start });
-      segs.push({ start: a.start, end: a.end, ann: a });
-      cursor = a.end;
-    }
-    if (cursor < text.length) segs.push({ start: cursor, end: text.length });
-    return segs;
-  }, [merged, text.length]);
-
-  return (
-    <ScrollArea className="flex-1 min-h-0">
-      <div
-        className="mx-auto max-w-[78ch] px-10 py-10 font-serif text-[16px] leading-[1.85] text-foreground/90"
-        data-testid="document-view"
-      >
-        <DocumentBlocks
-          text={text}
-          segments={segments}
-          selected={selected}
-          hoveredId={hoveredId}
-          onAnnotationClick={(ann) => {
-            const it = annotations.find((x) => x.id === ann.id);
-            if (it) onAnnotationClick(it);
-          }}
-        />
-      </div>
-    </ScrollArea>
-  );
-}
-
-function DocumentBlocks({
-  text,
-  segments,
-  selected,
-  hoveredId,
-  onAnnotationClick,
-}: {
-  text: string;
-  segments: { start: number; end: number; ann?: Annotation }[];
   selected: { start: number; end: number } | null;
   hoveredId: string | null;
-  onAnnotationClick: (ann: Annotation) => void;
+  onAnnotationClick: (item: FoundItem) => void;
 }) {
-  // Walk paragraphs and render annotations inline while preserving paragraph/heading split.
-  const paragraphs: { start: number; end: number; text: string }[] = useMemo(() => {
-    const out: { start: number; end: number; text: string }[] = [];
-    const blockRe = /[^\n]+(?:\n[^\n]+)*/g;
-    let m: RegExpExecArray | null;
-    while ((m = blockRe.exec(text))) {
-      out.push({ start: m.index, end: m.index + m[0].length, text: m[0] });
-    }
-    return out;
-  }, [text]);
+  type Ann = { id: string; start: number; end: number; kind: "citation" | "issue"; type: string };
+  type Seg = { text: string; ann: Ann | null; isSelected: boolean };
 
-  return (
-    <>
-      {paragraphs.map((p, i) => {
-        const trimmed = p.text.trim();
-        const isHeading =
-          trimmed.length > 0 && trimmed.length < 90 && !/[.!?:]$/.test(trimmed) && /^[A-ZА-ЯЁ]/u.test(trimmed);
-        // Filter segments that overlap this paragraph
-        const inside = segments
-          .map((s) => ({
-            ...s,
-            start: Math.max(s.start, p.start),
-            end: Math.min(s.end, p.end),
-          }))
-          .filter((s) => s.end > s.start);
+  const merged: Ann[] = useMemo(() => [
+    ...annotations.map((a) => ({ id: a.id, start: a.start, end: a.end, kind: "citation" as const, type: a.type })),
+    ...issues.map((i) => ({ id: i.id, start: i.start, end: i.end, kind: "issue" as const, type: i.type })),
+  ].sort((a, b) => a.start - b.start), [annotations, issues]);
 
-        const content = inside.map((s, j) => {
-          const segText = text.slice(s.start, s.end);
-          const isSelected =
-            !!selected && s.start >= selected.start && s.end <= selected.end;
-          if (!s.ann) {
-            return (
-              <span
-                key={j}
-                className={isSelected ? "bg-primary/30 ring-1 ring-primary/50 rounded-sm" : undefined}
-                ref={isSelected ? (el) => el?.scrollIntoView({ block: "center", behavior: "smooth" }) : undefined}
-              >
-                {segText}
-              </span>
-            );
-          }
-          const ann = s.ann;
-          const isHovered = hoveredId === ann.id;
-          const isFocused = isSelected;
-          return (
-            <span
-              key={j}
-              role="button"
-              tabIndex={0}
-              title={ann.note || ann.label}
-              data-testid={`annotation-${ann.id}`}
-              onClick={() => onAnnotationClick(ann)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onAnnotationClick(ann);
-                }
-              }}
-              ref={isFocused ? (el) => el?.scrollIntoView({ block: "center", behavior: "smooth" }) : undefined}
-              className={[
-                "rounded-[3px] px-0.5 -mx-[1px] cursor-pointer transition-colors duration-150",
-                annotationClass(ann.kind, ann.type),
-                isHovered ? "ring-2 ring-primary/60" : "",
-                isFocused ? "ring-2 ring-primary outline-none" : "",
-                "focus-visible:ring-2 focus-visible:ring-primary focus-visible:outline-none",
-              ].join(" ")}
-            >
-              {segText}
-            </span>
-          );
-        });
-
-        if (isHeading) {
-          return (
-            <h2
-              key={i}
-              className="font-sans text-[20px] font-semibold tracking-tight mt-7 mb-3 text-foreground"
-            >
-              {content}
-            </h2>
-          );
-        }
-        return (
-          <p key={i} className="mb-4 whitespace-pre-wrap">
-            {content}
-          </p>
-        );
-      })}
-    </>
-  );
-}
-
-function DocumentEditor({
-  draft,
-  onChange,
-}: {
-  draft: string;
-  onChange: (v: string) => void;
-}) {
-  const ref = useRef<HTMLTextAreaElement | null>(null);
-  useEffect(() => {
-    ref.current?.focus();
-  }, []);
-  return (
-    <div className="flex-1 min-h-0 overflow-hidden">
-      <div className="mx-auto max-w-[80ch] h-full px-10 py-6">
-        <Textarea
-          ref={ref}
-          value={draft}
-          onChange={(e) => onChange(e.target.value)}
-          className="h-full w-full resize-none font-serif text-[16px] leading-[1.85] bg-background/60 focus-visible:ring-1 focus-visible:ring-primary"
-          spellCheck
-          data-testid="textarea-editor"
-        />
-      </div>
-    </div>
-  );
-}
-
-// --- Inspector panels -----------------------------------------------------
-
-function PanelHeader({ title, hint }: { title: string; hint?: string }) {
-  return (
-    <div className="px-4 pt-4 pb-2">
-      <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground font-mono">Инспектор</div>
-      <h3 className="text-[15px] font-semibold mt-1">{title}</h3>
-      {hint && <p className="text-xs text-muted-foreground mt-1.5 leading-snug">{hint}</p>}
-    </div>
-  );
-}
-
-function CitationsPanel({
-  items,
-  total,
-  search,
-  setSearch,
-  typeFilter,
-  setTypeFilter,
-  onSelect,
-}: {
-  items: FoundItem[];
-  total: number;
-  search: string;
-  setSearch: (v: string) => void;
-  typeFilter: string;
-  setTypeFilter: (v: string) => void;
-  onSelect: (it: FoundItem) => void;
-}) {
-  return (
-    <>
-      <PanelHeader
-        title="Найденные элементы"
-        hint={`Сноски, цитаты и записи библиографии. Всего: ${total}. После фильтрации: ${items.length}.`}
-      />
-      <div className="px-4 pb-2 space-y-2">
-        <div className="relative">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Поиск по тексту, типу, заметке…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-8 h-9"
-            data-testid="input-search"
-          />
-        </div>
-        <Select value={typeFilter} onValueChange={setTypeFilter}>
-          <SelectTrigger className="h-9" data-testid="select-typefilter">
-            <Filter className="h-3.5 w-3.5 mr-1.5" />
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">Все типы</SelectItem>
-            <SelectItem value="inline-apa">APA-вставки</SelectItem>
-            <SelectItem value="inline-numeric">Числовые сноски</SelectItem>
-            <SelectItem value="footnote">Сноски (раскрытые)</SelectItem>
-            <SelectItem value="bibliography">Библиография</SelectItem>
-            <SelectItem value="ibid">Ibid./Там же</SelectItem>
-            <SelectItem value="quote">Цитаты</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="px-3 pb-4 space-y-1.5">
-          {items.length === 0 && (
-            <div className="text-center text-sm text-muted-foreground py-10">Ничего не найдено.</div>
-          )}
-          {items.map((it) => (
-            <button
-              key={it.id}
-              onClick={() => onSelect(it)}
-              className="w-full text-left rounded-md border border-card-border bg-card px-3 py-2 hover-elevate active-elevate-2"
-              data-testid={`citation-${it.id}`}
-            >
-              <div className="flex items-start justify-between gap-2 mb-1 min-w-0">
-                <Badge variant="outline" className="text-[10px] font-mono shrink min-w-0 truncate">
-                  {TYPE_LABELS[it.type]}
-                </Badge>
-                <div className="flex items-center gap-2 text-[10px] text-muted-foreground font-mono shrink-0">
-                  <span>строка {it.line}</span>
-                  <span>·</span>
-                  <span>{Math.round(it.confidence * 100)}%</span>
-                </div>
-              </div>
-              <div className="text-[13px] leading-snug font-serif text-foreground/95 line-clamp-3 break-words">{it.text}</div>
-              {it.note && (
-                <div className="mt-1 text-[11px] text-muted-foreground break-words">{it.note}</div>
-              )}
-            </button>
-          ))}
-        </div>
-      </ScrollArea>
-    </>
-  );
-}
-
-function StylePanel({ detected }: { detected: ReturnType<typeof detectStyle> }) {
-  return (
-    <>
-      <PanelHeader
-        title="Определение стиля цитирования"
-        hint="Эвристическая оценка по типу вставок, маркерам и формату библиографии."
-      />
-      <div className="px-4 pb-4 space-y-4">
-        <div className="rounded-lg border bg-card p-4">
-          <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-mono mb-1">
-            Стиль
-          </div>
-          <div className="text-2xl font-semibold" data-testid="text-style">
-            {detected.style === "Unknown" ? "Не определён" : detected.style}
-          </div>
-          <div className="mt-2 flex items-center gap-2 text-xs">
-            <span className="text-muted-foreground">Уверенность:</span>
-            <Badge variant="secondary" data-testid="text-confidence">
-              {Math.round(detected.confidence * 100)}%
-            </Badge>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-2 text-xs font-mono">
-            <Score label="APA" value={detected.scores.apa} />
-            <Score label="Chicago" value={detected.scores.chicago} />
-          </div>
-        </div>
-        <div>
-          <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-mono mb-2">
-            Объяснение
-          </div>
-          <ul className="space-y-1.5 text-sm">
-            {detected.reasons.length === 0 && (
-              <li className="text-muted-foreground">Признаков стиля не обнаружено.</li>
-            )}
-            {detected.reasons.map((r, i) => (
-              <li key={i} className="flex gap-2 items-start">
-                <span className="text-primary mt-1">•</span>
-                <span className="text-foreground/85">{r}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function Score({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-md border bg-background p-2">
-      <div className="text-muted-foreground">{label}</div>
-      <div className="text-base font-semibold">{value.toFixed(1)}</div>
-    </div>
-  );
-}
-
-function ConvertPanel({
-  detected,
-  onRun,
-  text,
-  customRules,
-  setCustomRules,
-  previewActive,
-  applyPreview,
-  onDiscard,
-}: {
-  detected: CitationStyle;
-  onRun: (target: CitationStyle) => void;
-  text: string;
-  customRules: CustomCitationRules;
-  setCustomRules: (rules: CustomCitationRules) => void;
-  previewActive: boolean;
-  applyPreview: () => void;
-  onDiscard: () => void;
-}) {
-  const [target, setTarget] = useState<CitationStyle>(detected === "APA" ? "Chicago" : "APA");
-  const result = useMemo(() => convertCitations(text, target, customRules), [text, target, customRules]);
-  const updateRule = <K extends keyof CustomCitationRules>(key: K, value: CustomCitationRules[K]) => {
-    setCustomRules({ ...customRules, [key]: value });
-  };
-  return (
-    <>
-      <PanelHeader
-        title="Конвертация Chicago ↔ APA"
-        hint="Эвристическое преобразование inline-цитат и записей библиографии. Демонстрационное — итог проверяйте вручную."
-      />
-      <div className="px-4 pb-3 space-y-3">
-        <div className="text-xs text-muted-foreground">
-          Текущий стиль: <Badge variant="outline">{detected === "Unknown" ? "не определён" : detected}</Badge>
-        </div>
-        <div className="flex items-center gap-2">
-          <Select value={target} onValueChange={(v) => setTarget(v as CitationStyle)}>
-            <SelectTrigger className="h-9" data-testid="select-target">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="APA">→ APA</SelectItem>
-              <SelectItem value="Chicago">→ Chicago</SelectItem>
-              <SelectItem value="MLA">→ MLA</SelectItem>
-              <SelectItem value="IEEE">→ IEEE</SelectItem>
-              <SelectItem value="Vancouver">→ Vancouver</SelectItem>
-              <SelectItem value="Harvard">→ Harvard</SelectItem>
-              <SelectItem value="GOST">→ ГОСТ</SelectItem>
-              <SelectItem value="Custom">→ Авторский</SelectItem>
-            </SelectContent>
-          </Select>
-          <Button size="sm" onClick={() => onRun(target)} data-testid="button-preview-convert">
-            <RefreshCw className="h-4 w-4 mr-1.5" />
-            Предпросмотр
-          </Button>
-        </div>
-        {previewActive && (
-          <div className="flex gap-2">
-            <Button size="sm" onClick={applyPreview} data-testid="button-apply-side">
-              Применить
-            </Button>
-            <Button size="sm" variant="outline" onClick={onDiscard}>
-              Отменить
-            </Button>
-          </div>
-        )}
-        <div className="text-xs text-muted-foreground">
-          Изменений: <span className="font-mono">{result.changes.length}</span>
-        </div>
-        {target === "Custom" && (
-          <div className="rounded-md border bg-card p-3 space-y-3" data-testid="custom-citation-builder">
-            <div>
-              <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-mono">
-                Конструктор авторской нотации
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                Используйте поля: {"{author}"}, {"{year}"}, {"{title}"}, {"{source}"}, {"{n}"}.
-              </p>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="custom-style-name">Название</Label>
-              <Input
-                id="custom-style-name"
-                value={customRules.name}
-                onChange={(e) => updateRule("name", e.target.value)}
-                data-testid="input-custom-style-name"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Модель ссылок</Label>
-              <Select value={customRules.mode} onValueChange={(v) => updateRule("mode", v as CustomCitationRules["mode"])}>
-                <SelectTrigger className="h-9" data-testid="select-custom-mode">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="author-date">Автор–год</SelectItem>
-                  <SelectItem value="numeric">Числовая</SelectItem>
-                  <SelectItem value="footnote">Сносочная</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="custom-inline">Внутритекстовая ссылка</Label>
-              <Input
-                id="custom-inline"
-                value={customRules.inlineTemplate}
-                onChange={(e) => updateRule("inlineTemplate", e.target.value)}
-                data-testid="input-custom-inline"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="custom-bib">Библиография</Label>
-              <Textarea
-                id="custom-bib"
-                value={customRules.bibliographyTemplate}
-                onChange={(e) => updateRule("bibliographyTemplate", e.target.value)}
-                className="min-h-[70px]"
-                data-testid="textarea-custom-bib"
-              />
-            </div>
-            <div className="text-[11px] text-muted-foreground">
-              Пример: {customRules.inlineTemplate || "—"}; {customRules.bibliographyTemplate || "—"}
-            </div>
-            <Separator className="my-2" />
-            <SourceTypeBuilder />
-          </div>
-        )}
-      </div>
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="px-3 pb-4 space-y-1.5">
-          {result.changes.length === 0 && (
-            <div className="text-sm text-muted-foreground px-3 py-6 text-center">
-              Нет автоматически преобразуемых записей. Попробуйте другой целевой стиль.
-            </div>
-          )}
-          {result.changes.map((c, i) => (
-            <div key={i} className="rounded-md border bg-card p-3 text-xs">
-              <div className="flex items-start justify-between gap-2 mb-1 min-w-0">
-                <Badge variant="outline" className="text-[10px] font-mono shrink min-w-0 truncate">
-                  {c.type === "inline" ? "Вставка" : "Библиография"}
-                </Badge>
-                <span className="text-muted-foreground font-mono shrink-0">строка {c.line}</span>
-              </div>
-              <div className="font-serif text-[12.5px] min-w-0">
-                <div className="text-muted-foreground line-through decoration-1 break-words">{c.before}</div>
-                <div className="mt-1 text-foreground/95 break-words">{c.after}</div>
-              </div>
-              <div className="mt-1.5 text-[11px] text-muted-foreground break-words">{c.note}</div>
-            </div>
-          ))}
-        </div>
-      </ScrollArea>
-    </>
-  );
-}
-
-function StructurePanel({
-  structure,
-  onJump,
-}: {
-  structure: ReturnType<typeof analyzeStructure>;
-  onJump: (line: number) => void;
-}) {
-  return (
-    <>
-      <PanelHeader title="Структура документа" hint="Заголовки, разделы, абзацы." />
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="px-4 pb-4 space-y-3">
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <Metric label="Заголовков" value={structure.headings.length} />
-            <Metric label="Абзацев" value={structure.paragraphs} />
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-mono mb-2">
-              Оглавление
-            </div>
-            <div className="space-y-0.5">
-              {structure.headings.map((h, i) => (
-                <button
-                  key={i}
-                  onClick={() => onJump(h.line)}
-                  className="w-full text-left text-sm rounded-md px-2.5 py-1.5 hover-elevate active-elevate-2 min-w-0"
-                  data-testid={`heading-${i}`}
-                >
-                  <span className="text-muted-foreground font-mono text-[10px] mr-2">{h.line}</span>
-                  <span className={`${h.level === 1 ? "font-semibold" : ""} break-words`}>{h.text}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          {structure.bibliographySection && (
-            <div className="rounded-md border bg-card p-3 text-xs">
-              <div className="font-semibold">Раздел библиографии</div>
-              <div className="text-muted-foreground mt-1 font-mono">
-                строки {structure.bibliographySection.startLine}–{structure.bibliographySection.endLine}
-              </div>
-            </div>
-          )}
-          {structure.footnotesSection && (
-            <div className="rounded-md border bg-card p-3 text-xs">
-              <div className="font-semibold">Сноски/Примечания</div>
-              <div className="text-muted-foreground mt-1 font-mono">
-                строки {structure.footnotesSection.startLine}–{structure.footnotesSection.endLine}
-              </div>
-            </div>
-          )}
-        </div>
-      </ScrollArea>
-    </>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="rounded-md border bg-card p-3">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-mono">{label}</div>
-      <div className="text-lg font-semibold mt-0.5 tabular-nums">{value}</div>
-    </div>
-  );
-}
-
-function EditorPanel({
-  issues,
-  onSelect,
-}: {
-  issues: EditorIssue[];
-  onSelect: (i: EditorIssue) => void;
-}) {
-  const [typeFilter, setTypeFilter] = useState<string>("all");
-  const filtered = issues.filter((i) => typeFilter === "all" || i.type === typeFilter);
-  const grouped = filtered.reduce<Record<string, number>>((acc, i) => {
-    acc[i.type] = (acc[i.type] || 0) + 1;
-    return acc;
-  }, {});
-
-  return (
-    <>
-      <PanelHeader
-        title="Академическая редактура"
-        hint="Подсказки на основе правил: длинные предложения, пассив, слабые формулировки, повторы, канцелярит, пунктуация."
-      />
-      <div className="px-4 pb-2 flex flex-wrap gap-1">
-        {Object.entries(grouped).map(([k, v]) => (
-          <Badge key={k} variant="secondary" className="text-[10px]">
-            {ISSUE_LABELS[k as EditorIssue["type"]]}: {v}
-          </Badge>
-        ))}
-      </div>
-      <div className="px-4 pb-2">
-        <Select value={typeFilter} onValueChange={setTypeFilter}>
-          <SelectTrigger className="h-9" data-testid="select-issuetype">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">Все типы</SelectItem>
-            {Object.keys(ISSUE_LABELS).map((k) => (
-              <SelectItem key={k} value={k}>
-                {ISSUE_LABELS[k as EditorIssue["type"]]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="px-3 pb-4 space-y-1.5">
-          {filtered.length === 0 && (
-            <div className="text-sm text-muted-foreground py-10 text-center">Подсказок нет.</div>
-          )}
-          {filtered.map((i) => (
-            <button
-              key={i.id}
-              onClick={() => onSelect(i)}
-              className="w-full text-left rounded-md border border-card-border bg-card px-3 py-2 hover-elevate active-elevate-2"
-              data-testid={`issue-${i.id}`}
-            >
-              <div className="flex items-start justify-between gap-2 mb-1 min-w-0">
-                <Badge variant="outline" className="text-[10px] font-mono shrink min-w-0 truncate">
-                  {ISSUE_LABELS[i.type]}
-                </Badge>
-                <span className="text-[10px] text-muted-foreground font-mono shrink-0">строка {i.line}</span>
-              </div>
-              <div className="text-[12.5px] leading-snug font-serif text-foreground/95 line-clamp-3 italic break-words">
-                «{i.fragment}»
-              </div>
-              <div className="mt-1.5 text-[11px] text-foreground/75 break-words">{i.suggestion}</div>
-            </button>
-          ))}
-        </div>
-      </ScrollArea>
-    </>
-  );
-}
-
-function StatsPanel({
-  stats,
-  found,
-  issues,
-  detected,
-}: {
-  stats: {
-    words: number;
-    charsWithSpaces: number;
-    charsNoSpaces: number;
-    paragraphs: number;
-    lines: number;
-    readingMinutes: number;
-  };
-  found: FoundItem[];
-  issues: EditorIssue[];
-  detected: ReturnType<typeof detectStyle>;
-}) {
-  return (
-    <>
-      <PanelHeader title="Статистика документа" />
-      <div className="px-4 pb-4 space-y-3">
-        <div className="grid grid-cols-2 gap-2">
-          <Metric label="Слова" value={stats.words} />
-          <Metric label="Знаки (с проб.)" value={stats.charsWithSpaces} />
-          <Metric label="Знаки (без проб.)" value={stats.charsNoSpaces} />
-          <Metric label="Абзацы" value={stats.paragraphs} />
-          <Metric label="Строки" value={stats.lines} />
-          <Metric label="≈ Чтение" value={`${stats.readingMinutes} мин`} />
-        </div>
-        <Separator />
-        <div className="grid grid-cols-2 gap-2">
-          <Metric label="Цитат и сносок" value={found.length} />
-          <Metric label="Подсказок редактуры" value={issues.length} />
-          <Metric label="Стиль" value={detected.style === "Unknown" ? "—" : detected.style} />
-          <Metric label="Уверенность" value={`${Math.round(detected.confidence * 100)}%`} />
-        </div>
-      </div>
-    </>
-  );
-}
-
-function SourceTypeBuilder() {
-  const [typeId, setTypeId] = useState<string>(DEFAULT_SOURCE_TYPES[0].id);
-  const tpl: SourceTypeTemplate =
-    DEFAULT_SOURCE_TYPES.find((t) => t.id === typeId) ?? DEFAULT_SOURCE_TYPES[0];
-  const [allFields, setAllFields] = useState<Record<string, Record<string, string>>>({});
-  const fields = allFields[typeId] ?? {};
-
-  const setField = (key: string, value: string) => {
-    setAllFields((prev) => ({
-      ...prev,
-      [typeId]: { ...(prev[typeId] ?? {}), [key]: value },
-    }));
-  };
-
-  const fullNote = renderSourceTemplate(tpl.fullNote, fields);
-  const shortNote = renderSourceTemplate(tpl.shortNote, fields);
-  const bibliography = renderSourceTemplate(tpl.bibliography, fields);
-  const inText = renderSourceTemplate(tpl.inText, fields);
-
-  return (
-    <div className="space-y-2.5">
-      <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-mono">
-        Конструктор типов источников
-      </div>
-      <div>
-        <Label className="text-xs">Тип источника</Label>
-        <Select value={typeId} onValueChange={setTypeId}>
-          <SelectTrigger className="h-9 mt-1" data-testid="select-sourcetype">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {DEFAULT_SOURCE_TYPES.map((t) => (
-              <SelectItem key={t.id} value={t.id} data-testid={`sourcetype-${t.id}`}>
-                {t.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <div className="grid grid-cols-1 gap-1.5">
-        {tpl.fields.map((f) => (
-          <div key={f}>
-            <Label htmlFor={`stf-${f}`} className="text-[11px] text-muted-foreground">
-              {SOURCE_TYPE_FIELD_LABELS[f] ?? f}
-            </Label>
-            <Input
-              id={`stf-${f}`}
-              value={fields[f] ?? ""}
-              onChange={(e) => setField(f, e.target.value)}
-              className="h-8 text-xs"
-              placeholder={SOURCE_TYPE_FIELD_LABELS[f] ?? f}
-              data-testid={`input-sourcefield-${f}`}
-            />
-          </div>
-        ))}
-      </div>
-      <div className="space-y-1.5">
-        <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-mono pt-1">
-          Предпросмотр шаблонов
-        </div>
-        <PreviewRow label="Полная сноска" value={fullNote} testid="preview-fullnote" />
-        <PreviewRow label="Краткая сноска" value={shortNote} testid="preview-shortnote" />
-        <PreviewRow label="Библиография" value={bibliography} testid="preview-bib" />
-        <PreviewRow label="В тексте" value={inText} testid="preview-intext" />
-      </div>
-    </div>
-  );
-}
-
-function PreviewRow({
-  label,
-  value,
-  testid,
-}: {
-  label: string;
-  value: string;
-  testid: string;
-}) {
-  return (
-    <div className="rounded-md border bg-card px-2.5 py-1.5">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-mono mb-0.5">
-        {label}
-      </div>
-      <div
-        className="text-[12.5px] font-serif text-foreground/95 break-words leading-snug"
-        data-testid={testid}
-      >
-        {value || "—"}
-      </div>
-    </div>
-  );
-}
+  const segments: Seg[] = useMemo(() => {
+    const segs: Seg[] = [];
+    let cursor = 0;
+    for (
