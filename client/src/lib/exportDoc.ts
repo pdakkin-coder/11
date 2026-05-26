@@ -18,10 +18,6 @@ function escapeXml(value: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function escapeHtml(value: string): string {
-  return escapeXml(value);
-}
-
 function downloadBlob(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -33,35 +29,67 @@ function downloadBlob(blob: Blob, fileName: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 500);
 }
 
-function isHeading(block: string, index: number): boolean {
-  const trimmed = block.trim();
-  if (!trimmed || trimmed.length > 90) return false;
-  if (index === 0) return true;
-  return !/[.!?:;]$/.test(trimmed);
+// ── HTML → plain text ─────────────────────────────────────────────────────────
+function htmlToText(html: string): string {
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  // Add newlines at block boundaries
+  div.querySelectorAll("p,h1,h2,h3,h4,h5,h6,li,br,blockquote").forEach((el) => {
+    el.appendChild(document.createTextNode("\n"));
+  });
+  return (div.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function toHtmlDocument(text: string, title: string): string {
-  const blocks = text.split(/\n\n+/);
-  const body = blocks
-    .map((block, index) => {
-      const trimmed = block.trim();
-      if (!trimmed) return "";
-      const tag = isHeading(trimmed, index) ? (index === 0 ? "h1" : "h2") : "p";
-      return `<${tag}>${escapeHtml(trimmed).replace(/\n/g, "<br>")}</${tag}>`;
-    })
-    .join("\n");
+// ── HTML → Markdown (basic) ───────────────────────────────────────────────────
+function htmlToMarkdown(html: string): string {
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  const lines: string[] = [];
 
+  function walk(node: Node, prefix = "") {
+    if (node.nodeType === Node.TEXT_NODE) {
+      lines.push(prefix + (node.textContent || ""));
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = node as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "h1") { lines.push("# " + el.textContent?.trim()); lines.push(""); }
+    else if (tag === "h2") { lines.push("## " + el.textContent?.trim()); lines.push(""); }
+    else if (tag === "h3") { lines.push("### " + el.textContent?.trim()); lines.push(""); }
+    else if (tag === "p") { lines.push(el.textContent?.trim() || ""); lines.push(""); }
+    else if (tag === "blockquote") { lines.push("> " + el.textContent?.trim()); lines.push(""); }
+    else if (tag === "li") {
+      const parent = el.parentElement?.tagName.toLowerCase();
+      const bullet = parent === "ol" ? "1. " : "- ";
+      lines.push(bullet + el.textContent?.trim());
+    }
+    else if (tag === "br") { lines.push(""); }
+    else { el.childNodes.forEach((c) => walk(c, prefix)); }
+  }
+
+  div.childNodes.forEach((n) => walk(n));
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// ── Full HTML document wrapper ────────────────────────────────────────────────
+function wrapHtmlDoc(body: string, title: string): string {
   return `<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <title>${escapeHtml(title.replace(/\.[^.]+$/, ""))}</title>
+  <title>${escapeXml(title.replace(/\.[^.]+$/, ""))}</title>
   <style>
     body { max-width: 72ch; margin: 48px auto; font: 16px/1.65 Georgia, serif; color: #28251d; }
-    h1, h2 { font-family: Arial, sans-serif; line-height: 1.25; }
     h1 { font-size: 24px; margin-bottom: 28px; }
-    h2 { font-size: 18px; margin-top: 28px; }
-    p { margin: 0 0 16px; }
+    h2 { font-size: 20px; margin-top: 32px; margin-bottom: 8px; }
+    h3 { font-size: 17px; margin-top: 24px; margin-bottom: 6px; }
+    p  { margin: 0 0 16px; }
+    ul, ol { margin: 0 0 16px; padding-left: 1.5em; }
+    blockquote { border-left: 3px solid #ccc; padding-left: 1em; color: #555; font-style: italic; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
+    td, th { border: 1px solid #ccc; padding: 6px 12px; }
+    th { background: #f5f5f5; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -70,43 +98,100 @@ ${body}
 </html>`;
 }
 
-function toMarkdown(text: string): string {
-  return text
-    .split(/\n\n+/)
-    .map((block, index) => {
-      const trimmed = block.trim();
-      if (!trimmed) return "";
-      if (isHeading(trimmed, index)) return `${index === 0 ? "# " : "## "}${trimmed}`;
-      return trimmed;
-    })
-    .join("\n\n");
+// ── DOCX: parse HTML nodes → Word XML ────────────────────────────────────────
+function escapeXmlStr(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-function paragraphXml(block: string, index: number): string {
-  const heading = isHeading(block, index);
-  const style = heading ? `<w:pPr><w:pStyle w:val="${index === 0 ? "Title" : "Heading2"}"/></w:pPr>` : "";
-  const lines = block.split("\n");
-  const runs = lines
-    .map((line, lineIndex) => {
-      const br = lineIndex > 0 ? "<w:br/>" : "";
-      return `<w:r>${br}<w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r>`;
-    })
-    .join("");
-  return `<w:p>${style}${runs}</w:p>`;
+function inlineXml(el: HTMLElement): string {
+  let result = "";
+  el.childNodes.forEach((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const txt = node.textContent || "";
+      if (txt) result += `<w:r><w:t xml:space="preserve">${escapeXmlStr(txt)}</w:t></w:r>`;
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const child = node as HTMLElement;
+      const tag = child.tagName.toLowerCase();
+      if (tag === "strong" || tag === "b") {
+        result += `<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${escapeXmlStr(child.textContent || "")}</w:t></w:r>`;
+      } else if (tag === "em" || tag === "i") {
+        result += `<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">${escapeXmlStr(child.textContent || "")}</w:t></w:r>`;
+      } else if (tag === "u") {
+        result += `<w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">${escapeXmlStr(child.textContent || "")}</w:t></w:r>`;
+      } else if (tag === "br") {
+        result += "<w:r><w:br/></w:r>";
+      } else {
+        result += inlineXml(child);
+      }
+    }
+  });
+  return result;
 }
 
-function createDocumentXml(text: string): string {
-  const body = text
-    .split(/\n\n+/)
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .map((block, index) => paragraphXml(block, index))
-    .join("");
+function blockXml(el: HTMLElement): string {
+  const tag = el.tagName.toLowerCase();
+  if (tag === "h1") {
+    return `<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr>${inlineXml(el)}</w:p>`;
+  }
+  if (tag === "h2") {
+    return `<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr>${inlineXml(el)}</w:p>`;
+  }
+  if (tag === "h3") {
+    return `<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr>${inlineXml(el)}</w:p>`;
+  }
+  if (tag === "blockquote") {
+    return `<w:p><w:pPr><w:ind w:left="720"/></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">${escapeXmlStr(el.textContent || "")}</w:t></w:r></w:p>`;
+  }
+  if (tag === "ul" || tag === "ol") {
+    return Array.from(el.querySelectorAll("li")).map((li) =>
+      `<w:p><w:pPr><w:ind w:left="480"/></w:pPr><w:r><w:t xml:space="preserve">• ${escapeXmlStr((li as HTMLElement).textContent || "")}</w:t></w:r></w:p>`
+    ).join("");
+  }
+  // p or unknown
+  const runs = inlineXml(el);
+  return runs ? `<w:p>${runs}</w:p>` : "";
+}
 
+function htmlToDocumentXml(html: string): string {
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  const blocks: string[] = [];
+  div.childNodes.forEach((node) => {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const xml = blockXml(node as HTMLElement);
+      if (xml) blocks.push(xml);
+    } else if (node.nodeType === Node.TEXT_NODE) {
+      const txt = node.textContent?.trim();
+      if (txt) blocks.push(`<w:p><w:r><w:t xml:space="preserve">${escapeXmlStr(txt)}</w:t></w:r></w:p>`);
+    }
+  });
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
-    ${body}
+    ${blocks.join("\n    ")}
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>`;
+}
+
+function plainTextToDocumentXml(text: string): string {
+  const blocks = text.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+  const paragraphs = blocks.map((b, i) => {
+    const isTitle = i === 0 && b.length < 90;
+    if (isTitle) return `<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>${escapeXmlStr(b)}</w:t></w:r></w:p>`;
+    return `<w:p><w:r><w:t xml:space="preserve">${escapeXmlStr(b)}</w:t></w:r></w:p>`;
+  });
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${paragraphs.join("\n    ")}
     <w:sectPr>
       <w:pgSz w:w="11906" w:h="16838"/>
       <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>
@@ -121,10 +206,11 @@ function createStylesXml(): string {
   <w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:sz w:val="24"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="360"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/><w:sz w:val="32"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="240" w:after="120"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/><w:sz w:val="28"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="200" w:after="100"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/><w:sz w:val="26"/></w:rPr></w:style>
 </w:styles>`;
 }
 
-function makeDocxFiles(text: string): Record<string, string> {
+function makeDocxFiles(docXml: string): Record<string, string> {
   return {
     "[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -141,11 +227,12 @@ function makeDocxFiles(text: string): Record<string, string> {
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 </Relationships>`,
-    "word/document.xml": createDocumentXml(text),
+    "word/document.xml": docXml,
     "word/styles.xml": createStylesXml(),
   };
 }
 
+// ── ZIP builder (no external deps) ───────────────────────────────────────────
 const CRC_TABLE = new Uint32Array(256).map((_, n) => {
   let c = n;
   for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
@@ -226,24 +313,45 @@ function createZip(files: Record<string, string>): Blob {
   });
 }
 
-async function exportDocx(text: string, docName: string) {
-  downloadBlob(createZip(makeDocxFiles(text)), safeName(docName, "docx"));
-}
+// ── Public API ────────────────────────────────────────────────────────────────
 
-export async function exportDocument(text: string, docName: string, format: ExportFormat) {
+/**
+ * Export the document to the requested format.
+ *
+ * @param text  - Plain text fallback (always available)
+ * @param docName - Original file name (used for the download filename)
+ * @param format  - Target format
+ * @param html  - Optional rich HTML from the RichEditor (used for DOCX/HTML exports
+ *                when available; falls back to `text` when absent)
+ */
+export async function exportDocument(
+  text: string,
+  docName: string,
+  format: ExportFormat,
+  html?: string
+) {
   if (format === "docx") {
-    await exportDocx(text, docName);
+    const docXml = html ? htmlToDocumentXml(html) : plainTextToDocumentXml(text);
+    downloadBlob(createZip(makeDocxFiles(docXml)), safeName(docName, "docx"));
     return;
   }
 
-  const content =
-    format === "html" ? toHtmlDocument(text, docName) :
-    format === "md" ? toMarkdown(text) :
-    text;
-  const type =
-    format === "html" ? "text/html;charset=utf-8" :
-    format === "md" ? "text/markdown;charset=utf-8" :
-    "text/plain;charset=utf-8";
+  if (format === "html") {
+    const body = html ?? `<p>${escapeXml(text).replace(/\n/g, "<br>")}</p>`;
+    downloadBlob(
+      new Blob([wrapHtmlDoc(body, docName)], { type: "text/html;charset=utf-8" }),
+      safeName(docName, "html")
+    );
+    return;
+  }
 
-  downloadBlob(new Blob([content], { type }), safeName(docName, format));
+  if (format === "md") {
+    const md = html ? htmlToMarkdown(html) : text;
+    downloadBlob(new Blob([md], { type: "text/markdown;charset=utf-8" }), safeName(docName, "md"));
+    return;
+  }
+
+  // txt
+  const plain = html ? htmlToText(html) : text;
+  downloadBlob(new Blob([plain], { type: "text/plain;charset=utf-8" }), safeName(docName, "txt"));
 }
